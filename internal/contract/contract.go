@@ -77,6 +77,10 @@ func (c *Contract) TriggerFile() string {
 		return "trigger.py"
 	case "node", "bun", "deno":
 		return "trigger.js"
+	case "typescript":
+		return "trigger.ts"
+	case "go":
+		return "trigger.go"
 	default:
 		return "trigger.py"
 	}
@@ -89,10 +93,12 @@ func (c *Contract) RuntimeBin() string {
 		return "python3"
 	case "node":
 		return "node"
-	case "bun":
+	case "bun", "typescript":
 		return "bun"
 	case "deno":
 		return "deno"
+	case "go":
+		return "go"
 	default:
 		return "python3"
 	}
@@ -100,10 +106,14 @@ func (c *Contract) RuntimeBin() string {
 
 // RuntimeArgs returns additional args needed before the script path for the runtime.
 func (c *Contract) RuntimeArgs() []string {
-	if c.Runtime == "deno" {
+	switch c.Runtime {
+	case "deno":
 		return []string{"run", "--allow-all"}
+	case "go":
+		return []string{"run"}
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (c *Contract) validate() error {
@@ -113,9 +123,9 @@ func (c *Contract) validate() error {
 	if c.Runtime == "" {
 		return fmt.Errorf("runtime is required")
 	}
-	validRuntimes := map[string]bool{"python": true, "node": true, "bun": true, "deno": true}
+	validRuntimes := map[string]bool{"python": true, "node": true, "bun": true, "deno": true, "typescript": true, "go": true}
 	if !validRuntimes[c.Runtime] {
-		return fmt.Errorf("invalid runtime %q, must be one of: python, node, bun, deno", c.Runtime)
+		return fmt.Errorf("invalid runtime %q, must be one of: python, node, bun, deno, typescript, go", c.Runtime)
 	}
 	if len(c.Functions) == 0 {
 		return fmt.Errorf("at least one function is required")

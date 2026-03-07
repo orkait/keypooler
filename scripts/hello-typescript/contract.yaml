@@ -1,0 +1,8 @@
+name: hello-typescript
+runtime: typescript
+functions:
+  greet:
+    feature: greeting
+    timeout: 10s
+    retry:
+      enabled: false

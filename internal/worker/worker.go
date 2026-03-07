@@ -29,6 +29,7 @@ type Worker struct {
 	pool         *keypool.Manager
 	dbAdap       db.DBAdapter
 	getContracts ContractsFunc
+	runner       *runner.Runner
 	encKey       string
 	logger       zerolog.Logger
 }
@@ -40,6 +41,7 @@ func NewWorker(
 	pool *keypool.Manager,
 	dbAdap db.DBAdapter,
 	getContracts ContractsFunc,
+	r *runner.Runner,
 	encKey string,
 	logger zerolog.Logger,
 ) *Worker {
@@ -49,6 +51,7 @@ func NewWorker(
 		pool:         pool,
 		dbAdap:       dbAdap,
 		getContracts: getContracts,
+		runner:       r,
 		encKey:       encKey,
 		logger:       logger.With().Int("worker_id", id).Logger(),
 	}
@@ -135,7 +138,7 @@ func (w *Worker) processItem(ctx context.Context, item *queue.Item) {
 		inputJSON = *exec.Input
 	}
 
-	result, err := runner.Run(ctx, c, exec.FunctionName, decryptedKey, inputJSON)
+	result, err := w.runner.Run(ctx, c, exec.FunctionName, decryptedKey, inputJSON)
 	if err != nil {
 		log.Warn().Err(err).Msg("script execution failed")
 		w.handleFailure(ctx, item, exec, fn, err.Error())

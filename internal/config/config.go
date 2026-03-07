@@ -33,6 +33,10 @@ type Config struct {
 	// Scripts
 	ScriptsPath string
 
+	// Runner
+	RunnerMode  string // "auto", "local", "docker"
+	RunnerImage string
+
 	// Logging
 	LogLevel    string
 	LogFormat   string
@@ -61,6 +65,9 @@ func Load() (*Config, error) {
 		QueueMaxSize: getEnvAsInt("QUEUE_MAX_SIZE", 1000),
 
 		ScriptsPath: getEnv("SCRIPTS_PATH", "./scripts"),
+
+		RunnerMode:  getEnv("RUNNER_MODE", "docker"),
+		RunnerImage: getEnv("RUNNER_IMAGE", "keypooler-runtime"),
 
 		LogLevel:    getEnv("LOG_LEVEL", "info"),
 		LogFormat:   getEnv("LOG_FORMAT", "json"),

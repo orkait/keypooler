@@ -1,0 +1,19 @@
+name: hello-world
+runtime: python
+functions:
+  greet:
+    feature: greeting
+    timeout: 10s
+    retry:
+      enabled: false
+  greet_scheduled:
+    feature: greeting
+    timeout: 10s
+    retry:
+      enabled: true
+      max_attempts: 3
+    scheduling:
+      enabled: false
+      cron: "*/5 * * * *"
+      input:
+        name: "cron"

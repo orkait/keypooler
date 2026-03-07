@@ -1,31 +1,24 @@
-# Binaries
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-key-pool-system
-
 # Database
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
 data/
+*.db
+*.db-shm
+*.db-wal
 
-# Environment
+# Secrets
 .env
 
+# Binary
+keypooler
+key-pool-system
+
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
-*.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Go
-vendor/
+# Dev notes
+indexes/
