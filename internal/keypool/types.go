@@ -5,85 +5,92 @@ import (
 	"time"
 )
 
-// PoolKey represents an API key loaded into the pool with runtime state
+// PoolKey is a runtime representation of an API key with rate tracking.
 type PoolKey struct {
-	ID                 string
-	Name               string
-	KeyEncrypted       string
-	Weight             int
-	RateLimitPerMinute int
-	RateLimitPerDay    int
-	ConcurrentLimit    int
+	ID           string
+	Name         string
+	KeyEncrypted string
+	TierID       string
+	IsActive     bool
 
-	// Runtime state (managed by the pool, not stored in DB until flush)
-	mu                sync.Mutex
-	currentConcurrent int
-	minuteCounter     int
-	dayCounter        int
-	minuteResetAt     time.Time
-	dayResetAt        time.Time
-	circuitBreaker    *CircuitBreaker
+	// Features and their rate limits (from tier)
+	Features map[string]int // feature -> rate_per_minute
+
+	mu           sync.Mutex
+	rateCounters map[string]*rateCounter // feature -> counter
 }
 
-// TryConcurrentAcquire attempts to increment the concurrent counter.
-// Returns true if under the limit, false if at capacity.
-func (k *PoolKey) TryConcurrentAcquire() bool {
+type rateCounter struct {
+	count       int
+	windowStart time.Time
+}
+
+// TryRate checks if the key has available rate for the given feature.
+// Returns true and increments counter if allowed.
+func (k *PoolKey) TryRate(feature string) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	if k.currentConcurrent >= k.ConcurrentLimit {
+	limit, ok := k.Features[feature]
+	if !ok {
+		return false // key doesn't support this feature
+	}
+
+	if k.rateCounters == nil {
+		k.rateCounters = make(map[string]*rateCounter)
+	}
+
+	rc, ok := k.rateCounters[feature]
+	if !ok {
+		rc = &rateCounter{}
+		k.rateCounters[feature] = rc
+	}
+
+	now := time.Now()
+	if now.Sub(rc.windowStart) >= time.Minute {
+		rc.count = 0
+		rc.windowStart = now
+	}
+
+	if rc.count >= limit {
 		return false
 	}
-	k.currentConcurrent++
+
+	rc.count++
 	return true
 }
 
-// ConcurrentRelease decrements the concurrent counter.
-func (k *PoolKey) ConcurrentRelease() {
+// HasFeature returns true if the key's tier supports the given feature.
+func (k *PoolKey) HasFeature(feature string) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-
-	if k.currentConcurrent > 0 {
-		k.currentConcurrent--
-	}
+	_, ok := k.Features[feature]
+	return ok
 }
 
-// TryRateLimit checks if the key is within its rate limits.
-// Returns true if allowed, false if rate limited.
-func (k *PoolKey) TryRateLimit() bool {
+// RateUsage returns current usage for each feature.
+func (k *PoolKey) RateUsage() map[string]RateInfo {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	now := time.Now().UTC()
-
-	// Reset minute counter if window expired
-	if now.After(k.minuteResetAt) {
-		k.minuteCounter = 0
-		k.minuteResetAt = now.Add(time.Minute)
+	usage := make(map[string]RateInfo, len(k.Features))
+	for feature, limit := range k.Features {
+		info := RateInfo{Limit: limit}
+		if rc, ok := k.rateCounters[feature]; ok {
+			now := time.Now()
+			if now.Sub(rc.windowStart) < time.Minute {
+				info.Used = rc.count
+				info.WindowStart = rc.windowStart
+			}
+		}
+		usage[feature] = info
 	}
-
-	// Reset day counter if window expired
-	if now.After(k.dayResetAt) {
-		k.dayCounter = 0
-		k.dayResetAt = now.Add(24 * time.Hour)
-	}
-
-	// Check limits
-	if k.minuteCounter >= k.RateLimitPerMinute {
-		return false
-	}
-	if k.dayCounter >= k.RateLimitPerDay {
-		return false
-	}
-
-	k.minuteCounter++
-	k.dayCounter++
-	return true
+	return usage
 }
 
-// GetCurrentConcurrent returns the current concurrent usage count.
-func (k *PoolKey) GetCurrentConcurrent() int {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	return k.currentConcurrent
+// RateInfo holds rate usage info for a single feature.
+type RateInfo struct {
+	Used        int
+	Limit       int
+	WindowStart time.Time
 }

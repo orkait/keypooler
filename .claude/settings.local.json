@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//cygdrive/c/**)",
+      "Read(//c/codingFiles/**)",
+      "Bash(go mod:*)",
+      "Bash(go build:*)",
+      "Bash(rm:*)"
+    ]
+  }
+}

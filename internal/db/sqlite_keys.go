@@ -6,164 +6,207 @@ import (
 	"fmt"
 )
 
-// CreateAPIKey inserts a new API key
-func (s *SQLiteAdapter) CreateAPIKey(ctx context.Context, key *APIKey) error {
-	query := `
-		INSERT INTO api_keys (
-			id, name, key_encrypted, weight, is_healthy, failure_count, 
-			circuit_state, rate_limit_per_minute, rate_limit_per_day, 
-			concurrent_limit, current_concurrent
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-	_, err := s.db.ExecContext(ctx, query,
-		key.ID, key.Name, key.KeyEncrypted, key.Weight, boolToInt(key.IsHealthy),
-		key.FailureCount, key.CircuitState, key.RateLimitPerMinute,
-		key.RateLimitPerDay, key.ConcurrentLimit, key.CurrentConcurrent,
+// --- Tiers ---
+
+func (a *SQLiteAdapter) CreateTier(ctx context.Context, tier *Tier) error {
+	_, err := a.db.ExecContext(ctx,
+		"INSERT INTO tiers (id, name) VALUES (?, ?)",
+		tier.ID, tier.Name,
 	)
+	return err
+}
+
+func (a *SQLiteAdapter) GetTier(ctx context.Context, id string) (*Tier, error) {
+	var t Tier
+	err := a.db.QueryRowContext(ctx,
+		"SELECT id, name, created_at FROM tiers WHERE id = ?", id,
+	).Scan(&t.ID, &t.Name, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("tier not found")
+	}
+	return &t, err
+}
+
+func (a *SQLiteAdapter) GetTierByName(ctx context.Context, name string) (*Tier, error) {
+	var t Tier
+	err := a.db.QueryRowContext(ctx,
+		"SELECT id, name, created_at FROM tiers WHERE name = ?", name,
+	).Scan(&t.ID, &t.Name, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &t, err
+}
+
+func (a *SQLiteAdapter) GetAllTiers(ctx context.Context) ([]*Tier, error) {
+	rows, err := a.db.QueryContext(ctx, "SELECT id, name, created_at FROM tiers ORDER BY name")
 	if err != nil {
-		return fmt.Errorf("failed to create API key: %w", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tiers []*Tier
+	for rows.Next() {
+		var t Tier
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		tiers = append(tiers, &t)
+	}
+	return tiers, rows.Err()
+}
+
+func (a *SQLiteAdapter) DeleteTier(ctx context.Context, id string) error {
+	result, err := a.db.ExecContext(ctx, "DELETE FROM tiers WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("tier not found")
 	}
 	return nil
 }
 
-// GetAPIKey retrieves a single API key by ID
-func (s *SQLiteAdapter) GetAPIKey(ctx context.Context, id string) (*APIKey, error) {
-	query := `
-		SELECT id, name, key_encrypted, weight, is_healthy, failure_count,
-			   circuit_state, last_used_at, rate_limit_per_minute, rate_limit_per_day,
-			   concurrent_limit, current_concurrent, created_at, updated_at
-		FROM api_keys WHERE id = ?
-	`
-	key, err := scanAPIKey(s.db.QueryRowContext(ctx, query, id))
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("API key not found: %s", id)
-	}
+// --- Tier Features ---
+
+func (a *SQLiteAdapter) SetTierFeatures(ctx context.Context, tierID string, features []*TierFeature) error {
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get API key: %w", err)
+		return err
 	}
-	return key, nil
+	defer tx.Rollback()
+
+	// Delete existing features for this tier
+	if _, err := tx.ExecContext(ctx, "DELETE FROM tier_features WHERE tier_id = ?", tierID); err != nil {
+		return err
+	}
+
+	// Insert new features
+	for _, f := range features {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO tier_features (tier_id, feature, rate_per_minute) VALUES (?, ?, ?)",
+			tierID, f.Feature, f.RatePerMinute,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
-// GetAllAPIKeys retrieves all API keys ordered by creation time
-func (s *SQLiteAdapter) GetAllAPIKeys(ctx context.Context) ([]*APIKey, error) {
-	query := `
-		SELECT id, name, key_encrypted, weight, is_healthy, failure_count,
-			   circuit_state, last_used_at, rate_limit_per_minute, rate_limit_per_day,
-			   concurrent_limit, current_concurrent, created_at, updated_at
-		FROM api_keys
-		ORDER BY created_at ASC
-	`
-	rows, err := s.db.QueryContext(ctx, query)
+func (a *SQLiteAdapter) GetTierFeatures(ctx context.Context, tierID string) ([]*TierFeature, error) {
+	rows, err := a.db.QueryContext(ctx,
+		"SELECT tier_id, feature, rate_per_minute FROM tier_features WHERE tier_id = ? ORDER BY feature",
+		tierID,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query API keys: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
-	var keys []*APIKey
+	var features []*TierFeature
 	for rows.Next() {
-		key, err := scanAPIKeyFromRows(rows)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan API key: %w", err)
+		var f TierFeature
+		if err := rows.Scan(&f.TierID, &f.Feature, &f.RatePerMinute); err != nil {
+			return nil, err
 		}
-		keys = append(keys, key)
+		features = append(features, &f)
+	}
+	return features, rows.Err()
+}
+
+// --- Keys ---
+
+func (a *SQLiteAdapter) CreateKey(ctx context.Context, key *Key) error {
+	_, err := a.db.ExecContext(ctx,
+		"INSERT INTO keys (id, name, key_encrypted, tier_id, is_active) VALUES (?, ?, ?, ?, ?)",
+		key.ID, key.Name, key.KeyEncrypted, key.TierID, boolToInt(key.IsActive),
+	)
+	return err
+}
+
+func (a *SQLiteAdapter) GetKey(ctx context.Context, id string) (*Key, error) {
+	var k Key
+	var isActive int
+	err := a.db.QueryRowContext(ctx,
+		"SELECT id, name, key_encrypted, tier_id, is_active, created_at FROM keys WHERE id = ?", id,
+	).Scan(&k.ID, &k.Name, &k.KeyEncrypted, &k.TierID, &isActive, &k.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("key not found")
+	}
+	k.IsActive = isActive != 0
+	return &k, err
+}
+
+func (a *SQLiteAdapter) GetAllKeys(ctx context.Context) ([]*Key, error) {
+	rows, err := a.db.QueryContext(ctx,
+		"SELECT id, name, key_encrypted, tier_id, is_active, created_at FROM keys ORDER BY created_at",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*Key
+	for rows.Next() {
+		var k Key
+		var isActive int
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyEncrypted, &k.TierID, &isActive, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		k.IsActive = isActive != 0
+		keys = append(keys, &k)
 	}
 	return keys, rows.Err()
 }
 
-// UpdateAPIKeyWeight updates the weight of an API key
-func (s *SQLiteAdapter) UpdateAPIKeyWeight(ctx context.Context, id string, weight int) error {
-	return s.execExpectingOneRow(ctx,
-		`UPDATE api_keys SET weight = ?, updated_at = datetime('now') WHERE id = ?`,
-		"API key", id, weight, id,
-	)
-}
-
-// UpdateAPIKeyHealth updates the health status of an API key
-func (s *SQLiteAdapter) UpdateAPIKeyHealth(ctx context.Context, id string, isHealthy bool, failureCount int, circuitState string) error {
-	return s.execExpectingOneRow(ctx,
-		`UPDATE api_keys SET is_healthy = ?, failure_count = ?, circuit_state = ?, updated_at = datetime('now') WHERE id = ?`,
-		"API key", id, boolToInt(isHealthy), failureCount, circuitState, id,
-	)
-}
-
-// UpdateAPIKeyLastUsed updates the last_used_at timestamp
-func (s *SQLiteAdapter) UpdateAPIKeyLastUsed(ctx context.Context, id string) error {
-	query := `UPDATE api_keys SET last_used_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-	_, err := s.db.ExecContext(ctx, query, id)
-	if err != nil {
-		return fmt.Errorf("failed to update API key last used: %w", err)
-	}
-	return nil
-}
-
-// UpdateAPIKeyConcurrent adjusts the current_concurrent counter by delta (+1 or -1)
-func (s *SQLiteAdapter) UpdateAPIKeyConcurrent(ctx context.Context, id string, delta int) error {
-	query := `UPDATE api_keys SET current_concurrent = current_concurrent + ?, updated_at = datetime('now') WHERE id = ?`
-	_, err := s.db.ExecContext(ctx, query, delta, id)
-	if err != nil {
-		return fmt.Errorf("failed to update API key concurrent count: %w", err)
-	}
-	return nil
-}
-
-// DeleteAPIKey removes an API key from the pool
-func (s *SQLiteAdapter) DeleteAPIKey(ctx context.Context, id string) error {
-	return s.execExpectingOneRow(ctx,
-		`DELETE FROM api_keys WHERE id = ?`,
-		"API key", id, id,
-	)
-}
-
-// ResetAPIKeyCircuit resets the circuit breaker to closed state
-func (s *SQLiteAdapter) ResetAPIKeyCircuit(ctx context.Context, id string) error {
-	return s.execExpectingOneRow(ctx,
-		`UPDATE api_keys SET failure_count = 0, circuit_state = ?, is_healthy = 1, updated_at = datetime('now') WHERE id = ?`,
-		"API key", id, CircuitStateClosed, id,
-	)
-}
-
-// scanAPIKey scans a single row into an APIKey struct
-func scanAPIKey(row *sql.Row) (*APIKey, error) {
-	key := &APIKey{}
-	var isHealthy int
-	var lastUsedAt sql.NullTime
-
-	err := row.Scan(
-		&key.ID, &key.Name, &key.KeyEncrypted, &key.Weight, &isHealthy,
-		&key.FailureCount, &key.CircuitState, &lastUsedAt,
-		&key.RateLimitPerMinute, &key.RateLimitPerDay, &key.ConcurrentLimit,
-		&key.CurrentConcurrent, &key.CreatedAt, &key.UpdatedAt,
+func (a *SQLiteAdapter) GetKeysByTier(ctx context.Context, tierID string) ([]*Key, error) {
+	rows, err := a.db.QueryContext(ctx,
+		"SELECT id, name, key_encrypted, tier_id, is_active, created_at FROM keys WHERE tier_id = ? ORDER BY created_at",
+		tierID,
 	)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
-	key.IsHealthy = intToBool(isHealthy)
-	if lastUsedAt.Valid {
-		key.LastUsedAt = &lastUsedAt.Time
+	var keys []*Key
+	for rows.Next() {
+		var k Key
+		var isActive int
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyEncrypted, &k.TierID, &isActive, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		k.IsActive = isActive != 0
+		keys = append(keys, &k)
 	}
-	return key, nil
+	return keys, rows.Err()
 }
 
-// scanAPIKeyFromRows scans a single row from sql.Rows into an APIKey struct
-func scanAPIKeyFromRows(rows *sql.Rows) (*APIKey, error) {
-	key := &APIKey{}
-	var isHealthy int
-	var lastUsedAt sql.NullTime
+func (a *SQLiteAdapter) DeleteKey(ctx context.Context, id string) error {
+	result, err := a.db.ExecContext(ctx, "DELETE FROM keys WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("key not found")
+	}
+	return nil
+}
 
-	err := rows.Scan(
-		&key.ID, &key.Name, &key.KeyEncrypted, &key.Weight, &isHealthy,
-		&key.FailureCount, &key.CircuitState, &lastUsedAt,
-		&key.RateLimitPerMinute, &key.RateLimitPerDay, &key.ConcurrentLimit,
-		&key.CurrentConcurrent, &key.CreatedAt, &key.UpdatedAt,
+func (a *SQLiteAdapter) SetKeyActive(ctx context.Context, id string, active bool) error {
+	result, err := a.db.ExecContext(ctx,
+		"UPDATE keys SET is_active = ? WHERE id = ?",
+		boolToInt(active), id,
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	key.IsHealthy = intToBool(isHealthy)
-	if lastUsedAt.Valid {
-		key.LastUsedAt = &lastUsedAt.Time
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("key not found")
 	}
-	return key, nil
+	return nil
 }

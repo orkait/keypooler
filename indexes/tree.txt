@@ -1,0 +1,59 @@
+keypooler/
+├── .env.example                    # Full env var reference with docs (159 lines)
+├── .gitignore                      # Go + SQLite + IDE exclusions
+├── Dockerfile                      # Multi-stage: golang:1.22-bookworm -> debian:bookworm-slim
+├── README.md                       # Comprehensive docs (790 lines)
+├── docker-compose.yml              # Single service + volume + healthcheck
+├── go.mod                          # Module: key-pool-system, Go 1.22.2
+├── go.sum
+├── cmd/
+│   └── main.go                     # Entrypoint: wires components, graceful shutdown (174 lines)
+├── indexes/                        # Codebase index files (this directory)
+├── internal/
+│   ├── api/
+│   │   ├── handlers.go             # HTTP handlers: health, requests, admin keys/config (501 lines)
+│   │   ├── helpers.go              # writeJSON, writeError, decodeJSON (23 lines)
+│   │   ├── middleware.go           # AdminAuth (constant-time), RequestLogger (51 lines)
+│   │   └── router.go              # Route registration + method dispatch (73 lines)
+│   ├── config/
+│   │   ├── config.go              # Config struct, Load() from env, validate() (192 lines)
+│   │   ├── helpers.go             # getEnv, getEnvAsInt/Bool/Float/Duration (69 lines)
+│   │   ├── reload.go              # HotReloadConfig, DB-driven runtime reload loop (174 lines)
+│   │   └── validators.go          # Field validators + valid value maps (83 lines)
+│   ├── crypto/
+│   │   └── crypto.go              # AES-256-GCM Encrypt/Decrypt, hex encoding (99 lines)
+│   ├── db/
+│   │   ├── adapter.go             # DBAdapter interface, APIKey/Request/KeyEvent structs (131 lines)
+│   │   ├── migrations.go          # File-based migration runner with versioning (164 lines)
+│   │   ├── sqlite.go              # SQLiteAdapter constructor, WAL mode setup (59 lines)
+│   │   ├── sqlite_config.go       # System config + key events DB ops (98 lines)
+│   │   ├── sqlite_keys.go         # API key CRUD operations (170 lines)
+│   │   └── sqlite_requests.go     # Request CRUD + pending retrieval (199 lines)
+│   ├── httpclient/
+│   │   └── client.go              # HTTP client wrapper, connection pooling (77 lines)
+│   ├── keypool/
+│   │   ├── circuitbreaker.go      # 3-state circuit breaker with mutex (113 lines)
+│   │   ├── manager.go             # Key pool orchestrator, reload loop (355 lines)
+│   │   ├── roundrobin.go          # Round-robin strategy (counter % len) (44 lines)
+│   │   ├── strategy.go            # KeySelectionStrategy interface (20 lines)
+│   │   ├── types.go               # PoolKey: rate limits, concurrency, acquire/release (90 lines)
+│   │   └── weightedrr.go          # Smooth weighted round-robin strategy (76 lines)
+│   ├── metrics/
+│   │   └── metrics.go             # Prometheus-format metrics, atomic counters (152 lines)
+│   ├── queue/
+│   │   ├── priority_queue.go      # Min-heap (container/heap) implementation (45 lines)
+│   │   ├── queue.go               # Bounded queue, preemption, dispatch loop (200 lines)
+│   │   └── types.go               # Item struct: RequestID, Priority, CreatedAt (14 lines)
+│   ├── util/
+│   │   ├── context.go             # DB timeout constants + DBContext helper (15 lines)
+│   │   └── json.go                # Safe JSON string -> map parser (15 lines)
+│   └── worker/
+│       ├── pool.go                # Worker pool with staggered warmup (84 lines)
+│       ├── retry.go               # Exponential backoff + jitter, ShouldRetry (36 lines)
+│       └── worker.go              # Request processor: dequeue->key->HTTP->result (256 lines)
+└── migrations/
+    ├── 001_create_api_keys.sql    # api_keys table (18 lines)
+    ├── 002_create_requests.sql    # requests table + 3 indexes (26 lines)
+    ├── 003_create_key_events.sql  # key_events table + index (12 lines)
+    ├── 004_create_system_config.sql  # system_config table (7 lines)
+    └── 005_seed_system_config.sql # Default config values (13 lines)

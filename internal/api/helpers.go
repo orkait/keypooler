@@ -15,8 +15,9 @@ func writeError(w http.ResponseWriter, status int, message string) {
 writeJSON(w, status, map[string]string{"error": message})
 }
 
+const maxBodySize = 1 << 20 // 1 MB
+
 func decodeJSON(r *http.Request, dst any) error {
-decoder := json.NewDecoder(r.Body)
-decoder.DisallowUnknownFields()
-return decoder.Decode(dst)
+r.Body = http.MaxBytesReader(nil, r.Body, maxBodySize)
+return json.NewDecoder(r.Body).Decode(dst)
 }

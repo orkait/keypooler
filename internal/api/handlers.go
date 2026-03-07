@@ -3,52 +3,69 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
-	"time"
+	"sync"
 
 	"key-pool-system/internal/config"
+	"key-pool-system/internal/contract"
 	"key-pool-system/internal/crypto"
 	"key-pool-system/internal/db"
 	"key-pool-system/internal/keypool"
 	"key-pool-system/internal/queue"
+	"key-pool-system/internal/scheduler"
 	"key-pool-system/internal/util"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
 
-// Server holds all dependencies needed by the HTTP handlers.
+// Server holds all dependencies needed by HTTP handlers.
 type Server struct {
-	DB     db.DBAdapter
-	Queue  *queue.Queue
-	Pool   *keypool.Manager
-	HotCfg *config.HotReloadConfig
-	Cfg    *config.Config
-	Logger zerolog.Logger
+	DB        db.DBAdapter
+	Queue     *queue.Queue
+	Pool      *keypool.Manager
+	Cfg       *config.Config
+	Scheduler *scheduler.Scheduler
+	Logger    zerolog.Logger
+
+	mu        sync.RWMutex
+	contracts map[string]*contract.Contract
+}
+
+// SetContracts replaces the contracts map (thread-safe).
+func (s *Server) SetContracts(c map[string]*contract.Contract) {
+	s.mu.Lock()
+	s.contracts = c
+	s.mu.Unlock()
+}
+
+// GetContracts returns the current contracts map (thread-safe).
+func (s *Server) GetContracts() map[string]*contract.Contract {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.contracts
 }
 
 // --- Public endpoints ---
 
-// HealthCheck returns a simple OK response.
 func (s *Server) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// SubmitRequest handles POST /api/requests
-func (s *Server) SubmitRequest(w http.ResponseWriter, r *http.Request) {
+// Execute handles POST /api/execute
+func (s *Server) Execute(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	var body struct {
-		IdempotencyKey string            `json:"idempotency_key"`
-		Source         string            `json:"source"`
-		Priority       int               `json:"priority"`
-		Method         string            `json:"method"`
-		URL            string            `json:"url"`
-		Headers        map[string]string `json:"headers"`
-		Payload        string            `json:"payload"`
+		Script      string         `json:"script"`
+		Function    string         `json:"function"`
+		Input       map[string]any `json:"input"`
+		CallbackURL string         `json:"callback_url"`
 	}
 
 	if err := decodeJSON(r, &body); err != nil {
@@ -56,114 +73,194 @@ func (s *Server) SubmitRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields
-	if body.Method == "" || body.URL == "" {
-		writeError(w, http.StatusBadRequest, "method and url are required")
+	if body.Script == "" || body.Function == "" {
+		writeError(w, http.StatusBadRequest, "script and function are required")
 		return
 	}
 
-	// Default priority
-	if body.Priority == 0 {
-		body.Priority = db.PriorityNormal
+	// Validate script + function exist
+	c, ok := s.GetContracts()[body.Script]
+	if !ok {
+		writeError(w, http.StatusNotFound, "script not found: "+body.Script)
+		return
 	}
-	if body.Priority < db.PriorityHigh || body.Priority > db.PriorityLow {
-		writeError(w, http.StatusBadRequest, "priority must be 1 (high), 2 (normal), or 3 (low)")
+	fn, ok := c.Functions[body.Function]
+	if !ok {
+		writeError(w, http.StatusNotFound, "function not found: "+body.Function)
 		return
 	}
 
-	// Default source
-	if body.Source == "" {
-		body.Source = db.SourceManual
+	// Serialize input
+	inputJSON := "{}"
+	if body.Input != nil {
+		b, _ := json.Marshal(body.Input)
+		inputJSON = string(b)
 	}
 
-	// Idempotency check
-	if body.IdempotencyKey != "" {
-		ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
-		defer cancel()
-		existing, err := s.DB.GetRequestByIdempotencyKey(ctx, body.IdempotencyKey)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "database error")
-			return
-		}
-		if existing != nil {
-			writeJSON(w, http.StatusOK, requestToResponse(existing))
-			return
-		}
+	// Create execution record
+	execID := uuid.New().String()
+	exec := &db.Execution{
+		ID:           execID,
+		Script:       body.Script,
+		FunctionName: body.Function,
+		Status:       db.StatusPending,
+		TriggerType:  db.TriggerAPI,
+		Input:        &inputJSON,
+	}
+	if body.CallbackURL != "" {
+		exec.CallbackURL = &body.CallbackURL
 	}
 
-	// Build request record
-	req := &db.Request{
-		ID:             uuid.New().String(),
-		Source:         body.Source,
-		Priority:       body.Priority,
-		Method:         strings.ToUpper(body.Method),
-		DestinationURL: body.URL,
-		Status:         db.RequestStatusPending,
-	}
-
-	if body.IdempotencyKey != "" {
-		req.IdempotencyKey = &body.IdempotencyKey
-	}
-	if body.Payload != "" {
-		req.Payload = &body.Payload
-	}
-	if len(body.Headers) > 0 {
-		h, _ := marshalJSON(body.Headers)
-		req.Headers = &h
-	}
-
-	// Save to DB
 	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
 	defer cancel()
-	if err := s.DB.CreateRequest(ctx, req); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save request")
+	if err := s.DB.CreateExecution(ctx, exec); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create execution")
 		return
 	}
 
 	// Enqueue
-	item := &queue.Item{
-		RequestID: req.ID,
-		Priority:  req.Priority,
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := s.Queue.Enqueue(item); err != nil {
+	if err := s.Queue.Enqueue(&queue.Item{
+		ExecutionID: execID,
+		Feature:     fn.Feature,
+	}); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "queue is full")
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, requestToResponse(req))
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"execution_id": execID,
+		"status":       db.StatusPending,
+	})
 }
 
-// GetRequestStatus handles GET /api/requests/{id}
-func (s *Server) GetRequestStatus(w http.ResponseWriter, r *http.Request) {
+// GetExecution handles GET /api/executions/{id}
+func (s *Server) GetExecution(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	id := extractPathParam(r.URL.Path, "/api/requests/")
+	id := extractPathParam(r.URL.Path, "/api/executions/")
 	if id == "" {
-		writeError(w, http.StatusBadRequest, "request id required")
+		writeError(w, http.StatusBadRequest, "execution id required")
 		return
 	}
 
 	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
 	defer cancel()
 
-	req, err := s.DB.GetRequest(ctx, id)
+	exec, err := s.DB.GetExecution(ctx, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database error")
 		return
 	}
-	if req == nil {
-		writeError(w, http.StatusNotFound, "request not found")
+	if exec == nil {
+		writeError(w, http.StatusNotFound, "execution not found")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, requestToResponse(req))
+	writeJSON(w, http.StatusOK, executionToResponse(exec))
 }
 
 // --- Admin endpoints ---
+
+// CreateTier handles POST /admin/tiers
+func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var body struct {
+		Name     string         `json:"name"`
+		Features map[string]int `json:"features"`
+	}
+
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	if body.Name == "" || len(body.Features) == 0 {
+		writeError(w, http.StatusBadRequest, "name and features are required")
+		return
+	}
+
+	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
+	defer cancel()
+
+	// Check if tier name already exists
+	existing, err := s.DB.GetTierByName(ctx, body.Name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if existing != nil {
+		writeError(w, http.StatusConflict, "tier already exists: "+body.Name)
+		return
+	}
+
+	tier := &db.Tier{
+		ID:   uuid.New().String(),
+		Name: body.Name,
+	}
+	if err := s.DB.CreateTier(ctx, tier); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create tier")
+		return
+	}
+
+	features := make([]*db.TierFeature, 0, len(body.Features))
+	for feature, rate := range body.Features {
+		features = append(features, &db.TierFeature{
+			TierID:       tier.ID,
+			Feature:      feature,
+			RatePerMinute: rate,
+		})
+	}
+	if err := s.DB.SetTierFeatures(ctx, tier.ID, features); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to set features")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":       tier.ID,
+		"name":     tier.Name,
+		"features": body.Features,
+	})
+}
+
+// ListTiers handles GET /admin/tiers
+func (s *Server) ListTiers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
+	defer cancel()
+
+	tiers, err := s.DB.GetAllTiers(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+
+	result := make([]map[string]any, len(tiers))
+	for i, t := range tiers {
+		features, _ := s.DB.GetTierFeatures(ctx, t.ID)
+		fm := make(map[string]int)
+		for _, f := range features {
+			fm[f.Feature] = f.RatePerMinute
+		}
+		result[i] = map[string]any{
+			"id":       t.ID,
+			"name":     t.Name,
+			"features": fm,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
 
 // AddKey handles POST /admin/keys
 func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
@@ -173,12 +270,9 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name               string `json:"name"`
-		Key                string `json:"key"`
-		Weight             int    `json:"weight"`
-		RateLimitPerMinute int    `json:"rate_limit_per_minute"`
-		RateLimitPerDay    int    `json:"rate_limit_per_day"`
-		ConcurrentLimit    int    `json:"concurrent_limit"`
+		Name string `json:"name"`
+		Key  string `json:"key"`
+		Tier string `json:"tier"`
 	}
 
 	if err := decodeJSON(r, &body); err != nil {
@@ -186,56 +280,52 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.Name == "" || body.Key == "" {
-		writeError(w, http.StatusBadRequest, "name and key are required")
+	if body.Name == "" || body.Key == "" || body.Tier == "" {
+		writeError(w, http.StatusBadRequest, "name, key, and tier are required")
 		return
 	}
 
-	// Defaults
-	if body.Weight == 0 {
-		body.Weight = 1
+	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
+	defer cancel()
+
+	// Look up tier by name
+	tier, err := s.DB.GetTierByName(ctx, body.Tier)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
 	}
-	if body.RateLimitPerMinute == 0 {
-		body.RateLimitPerMinute = 60
-	}
-	if body.RateLimitPerDay == 0 {
-		body.RateLimitPerDay = 10000
-	}
-	if body.ConcurrentLimit == 0 {
-		body.ConcurrentLimit = 5
+	if tier == nil {
+		writeError(w, http.StatusNotFound, "tier not found: "+body.Tier)
+		return
 	}
 
-	// Encrypt the key
 	encrypted, err := crypto.Encrypt(body.Key, s.Cfg.EncryptionKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to encrypt key")
 		return
 	}
 
-	apiKey := &db.APIKey{
-		ID:                 uuid.New().String(),
-		Name:               body.Name,
-		KeyEncrypted:       encrypted,
-		Weight:             body.Weight,
-		IsHealthy:          true,
-		CircuitState:       db.CircuitStateClosed,
-		RateLimitPerMinute: body.RateLimitPerMinute,
-		RateLimitPerDay:    body.RateLimitPerDay,
-		ConcurrentLimit:    body.ConcurrentLimit,
+	key := &db.Key{
+		ID:           uuid.New().String(),
+		Name:         body.Name,
+		KeyEncrypted: encrypted,
+		TierID:       tier.ID,
+		IsActive:     true,
 	}
 
-	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
-	defer cancel()
-
-	if err := s.DB.CreateAPIKey(ctx, apiKey); err != nil {
+	if err := s.DB.CreateKey(ctx, key); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create key")
 		return
 	}
 
-	// Log event
-	s.logKeyEvent(apiKey.ID, db.EventKeyCreated, "key created via API")
+	// Reload key pool
+	_ = s.Pool.ReloadKeys()
 
-	writeJSON(w, http.StatusCreated, keyToResponse(apiKey))
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":   key.ID,
+		"name": key.Name,
+		"tier": body.Tier,
+	})
 }
 
 // ListKeys handles GET /admin/keys
@@ -245,19 +335,25 @@ func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
-	defer cancel()
-
-	keys, err := s.DB.GetAllAPIKeys(ctx)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
-		return
+	statuses := s.Pool.GetHealthStatus()
+	result := make([]map[string]any, len(statuses))
+	for i, ks := range statuses {
+		usage := make(map[string]any)
+		for feature, info := range ks.Usage {
+			usage[feature] = map[string]any{
+				"used":  info.Used,
+				"limit": info.Limit,
+			}
+		}
+		result[i] = map[string]any{
+			"id":        ks.ID,
+			"name":      ks.Name,
+			"tier_id":   ks.TierID,
+			"is_active": ks.IsActive,
+			"usage":     usage,
+		}
 	}
 
-	result := make([]map[string]any, len(keys))
-	for i, k := range keys {
-		result[i] = keyToResponse(k)
-	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -274,107 +370,62 @@ func (s *Server) DeleteKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for /reset suffix
-	if strings.HasSuffix(id, "/reset") || strings.HasSuffix(id, "/weight") {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
 	defer cancel()
 
-	if err := s.DB.DeleteAPIKey(ctx, id); err != nil {
+	if err := s.DB.DeleteKey(ctx, id); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete key")
 		return
 	}
 
-	s.logKeyEvent(id, db.EventKeyDeleted, "key deleted via API")
+	_ = s.Pool.ReloadKeys()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// UpdateKeyWeight handles PUT /admin/keys/{id}/weight
-func (s *Server) UpdateKeyWeight(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
+// Health handles GET /admin/health
+func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	// Path: /admin/keys/{id}/weight
-	path := strings.TrimPrefix(r.URL.Path, "/admin/keys/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 || parts[0] == "" {
-		writeError(w, http.StatusBadRequest, "key id required")
-		return
-	}
-	id := parts[0]
-
-	var body struct {
-		Weight int `json:"weight"`
-	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
-	}
-	if body.Weight <= 0 {
-		writeError(w, http.StatusBadRequest, "weight must be positive")
-		return
-	}
-
-	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
-	defer cancel()
-
-	if err := s.DB.UpdateAPIKeyWeight(ctx, id, body.Weight); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update weight")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "weight": body.Weight})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pool_size":        s.Pool.PoolSize(),
+		"queue_size":       s.Queue.Size(),
+		"active_schedules": s.Scheduler.ActiveCount(),
+	})
 }
 
-// ResetKeyCircuit handles POST /admin/keys/{id}/reset
-func (s *Server) ResetKeyCircuit(w http.ResponseWriter, r *http.Request) {
+// ScanScripts handles POST /admin/scripts/scan
+func (s *Server) ScanScripts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, "/admin/keys/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 || parts[0] == "" {
-		writeError(w, http.StatusBadRequest, "key id required")
-		return
-	}
-	id := parts[0]
-
-	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
-	defer cancel()
-
-	if err := s.DB.ResetAPIKeyCircuit(ctx, id); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to reset circuit breaker")
+	contracts, err := ScanScriptsDir(s.Cfg.ScriptsPath, s.Logger)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "scan failed: "+err.Error())
 		return
 	}
 
-	s.logKeyEvent(id, db.EventCircuitClosed, "circuit breaker manually reset via API")
-	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "circuit_reset"})
-}
+	// Update in-memory contracts
+	s.SetContracts(contracts)
+	s.Scheduler.LoadFromContracts(contracts)
 
-// PoolHealth handles GET /admin/health
-func (s *Server) PoolHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+	names := make([]string, 0, len(contracts))
+	for name := range contracts {
+		names = append(names, name)
 	}
 
-	statuses := s.Pool.GetHealthStatus()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"pool_size":  s.Pool.PoolSize(),
-		"queue_size": s.Queue.Size(),
-		"keys":       statuses,
+		"scripts": names,
+		"count":   len(contracts),
 	})
 }
 
-// GetConfig handles GET /admin/config
-func (s *Server) GetConfig(w http.ResponseWriter, r *http.Request) {
+// GetDeadLetters handles GET /admin/dead-letter
+func (s *Server) GetDeadLetters(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -383,118 +434,173 @@ func (s *Server) GetConfig(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
 	defer cancel()
 
-	cfg, err := s.DB.GetSystemConfig(ctx)
+	dls, err := s.DB.GetDeadLetters(ctx, 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database error")
 		return
 	}
-	writeJSON(w, http.StatusOK, cfg)
+
+	result := make([]map[string]any, len(dls))
+	for i, dl := range dls {
+		entry := map[string]any{
+			"id":            dl.ID,
+			"execution_id":  dl.ExecutionID,
+			"script":        dl.Script,
+			"function_name": dl.FunctionName,
+			"attempts":      dl.Attempts,
+			"failed_at":     dl.FailedAt,
+		}
+		if dl.Input != nil {
+			entry["input"] = *dl.Input
+		}
+		if dl.Error != nil {
+			entry["error"] = *dl.Error
+		}
+		result[i] = entry
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
-// UpdateConfig handles PUT /admin/config
-func (s *Server) UpdateConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
+// RetryDeadLetter handles POST /admin/dead-letter/{id}/retry
+func (s *Server) RetryDeadLetter(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	var body map[string]string
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	// Extract ID — path is /admin/dead-letter/{id}/retry
+	path := strings.TrimPrefix(r.URL.Path, "/admin/dead-letter/")
+	id := strings.TrimSuffix(path, "/retry")
+	if id == "" || id == path {
+		writeError(w, http.StatusBadRequest, "dead letter id required")
 		return
 	}
 
 	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
 	defer cancel()
 
-	for key, value := range body {
-		if err := s.DB.UpdateSystemConfig(ctx, key, value); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update config key: "+key)
-			return
+	dl, err := s.DB.GetDeadLetter(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if dl == nil {
+		writeError(w, http.StatusNotFound, "dead letter entry not found")
+		return
+	}
+
+	// Look up contract to get feature
+	c, ok := s.GetContracts()[dl.Script]
+	if !ok {
+		writeError(w, http.StatusNotFound, "script not found: "+dl.Script)
+		return
+	}
+	fn, ok := c.Functions[dl.FunctionName]
+	if !ok {
+		writeError(w, http.StatusNotFound, "function not found: "+dl.FunctionName)
+		return
+	}
+
+	// Create new execution
+	execID := uuid.New().String()
+	exec := &db.Execution{
+		ID:           execID,
+		Script:       dl.Script,
+		FunctionName: dl.FunctionName,
+		Status:       db.StatusPending,
+		TriggerType:  db.TriggerAPI,
+		Input:        dl.Input,
+	}
+
+	if err := s.DB.CreateExecution(ctx, exec); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create execution")
+		return
+	}
+
+	// Remove from dead letter
+	_ = s.DB.DeleteDeadLetter(ctx, id)
+
+	// Enqueue
+	if err := s.Queue.Enqueue(&queue.Item{
+		ExecutionID: execID,
+		Feature:     fn.Feature,
+	}); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "queue is full")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"execution_id": execID,
+		"status":       db.StatusPending,
+	})
+}
+
+// --- Helpers ---
+
+func ScanScriptsDir(scriptsPath string, logger zerolog.Logger) (map[string]*contract.Contract, error) {
+	contracts := make(map[string]*contract.Contract)
+
+	entries, err := os.ReadDir(scriptsPath)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
 		}
+
+		dir := filepath.Join(scriptsPath, entry.Name())
+		c, err := contract.LoadFromDir(dir)
+		if err != nil {
+			logger.Warn().Err(err).Str("dir", entry.Name()).Msg("skipping invalid script")
+			continue
+		}
+
+		contracts[c.Name] = c
+		logger.Info().Str("script", c.Name).Str("runtime", c.Runtime).
+			Int("functions", len(c.Functions)).Msg("loaded script contract")
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	return contracts, nil
 }
 
-// --- Helper functions ---
-
-func (s *Server) logKeyEvent(keyID, eventType, message string) {
-	ctx, cancel := util.DBContext(nil, util.DBTimeoutShort)
-	defer cancel()
-
-	event := &db.KeyEvent{
-		KeyID:     keyID,
-		EventType: eventType,
-		Message:   &message,
-	}
-	_ = s.DB.CreateKeyEvent(ctx, event)
-}
-
-func requestToResponse(req *db.Request) map[string]any {
+func executionToResponse(exec *db.Execution) map[string]any {
 	resp := map[string]any{
-		"id":         req.ID,
-		"source":     req.Source,
-		"priority":   req.Priority,
-		"method":     req.Method,
-		"url":        req.DestinationURL,
-		"status":     req.Status,
-		"attempts":   req.Attempts,
-		"created_at": req.CreatedAt,
-		"updated_at": req.UpdatedAt,
+		"id":            exec.ID,
+		"script":        exec.Script,
+		"function_name": exec.FunctionName,
+		"status":        exec.Status,
+		"trigger":       exec.TriggerType,
+		"attempts":      exec.Attempts,
+		"created_at":    exec.CreatedAt,
 	}
-	if req.IdempotencyKey != nil {
-		resp["idempotency_key"] = *req.IdempotencyKey
+	if exec.KeyID != nil {
+		resp["key_id"] = *exec.KeyID
 	}
-	if req.AssignedKeyID != nil {
-		resp["assigned_key_id"] = *req.AssignedKeyID
+	if exec.CallbackURL != nil {
+		resp["callback_url"] = *exec.CallbackURL
 	}
-	if req.ResponseStatus != nil {
-		resp["response_status"] = *req.ResponseStatus
+	if exec.Input != nil {
+		resp["input"] = json.RawMessage(*exec.Input)
 	}
-	if req.ResponseBody != nil {
-		resp["response_body"] = *req.ResponseBody
+	if exec.Output != nil {
+		resp["output"] = json.RawMessage(*exec.Output)
 	}
-	if req.LastError != nil {
-		resp["last_error"] = *req.LastError
+	if exec.Error != nil {
+		resp["error"] = *exec.Error
 	}
-	if req.CompletedAt != nil {
-		resp["completed_at"] = *req.CompletedAt
-	}
-	return resp
-}
-
-func keyToResponse(k *db.APIKey) map[string]any {
-	resp := map[string]any{
-		"id":                    k.ID,
-		"name":                  k.Name,
-		"weight":                k.Weight,
-		"is_healthy":            k.IsHealthy,
-		"failure_count":         k.FailureCount,
-		"circuit_state":         k.CircuitState,
-		"rate_limit_per_minute": k.RateLimitPerMinute,
-		"rate_limit_per_day":    k.RateLimitPerDay,
-		"concurrent_limit":      k.ConcurrentLimit,
-		"current_concurrent":    k.CurrentConcurrent,
-		"created_at":            k.CreatedAt,
-		"updated_at":            k.UpdatedAt,
-	}
-	if k.LastUsedAt != nil {
-		resp["last_used_at"] = *k.LastUsedAt
+	if exec.CompletedAt != nil {
+		resp["completed_at"] = *exec.CompletedAt
 	}
 	return resp
 }
 
 func extractPathParam(path, prefix string) string {
 	trimmed := strings.TrimPrefix(path, prefix)
-	// Remove any trailing segments
 	if idx := strings.Index(trimmed, "/"); idx != -1 {
 		trimmed = trimmed[:idx]
 	}
 	return trimmed
-}
-
-func marshalJSON(v any) (string, error) {
-	b, err := json.Marshal(v)
-	return string(b), err
 }

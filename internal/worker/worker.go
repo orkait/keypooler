@@ -2,75 +2,59 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
+	"math/rand/v2"
 	"time"
 
-	"key-pool-system/internal/config"
+	"key-pool-system/internal/contract"
 	"key-pool-system/internal/crypto"
 	"key-pool-system/internal/db"
 	"key-pool-system/internal/keypool"
 	"key-pool-system/internal/queue"
+	"key-pool-system/internal/runner"
 	"key-pool-system/internal/util"
+	"key-pool-system/internal/webhook"
+
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
 
-// HTTPClient is the interface the worker uses to make API calls.
-// This will be implemented by the httpclient package (Step 6).
-type HTTPClient interface {
-	Do(ctx context.Context, req *HTTPRequest) (*HTTPResponse, error)
-}
+// ContractsFunc returns the current contracts map (thread-safe).
+type ContractsFunc func() map[string]*contract.Contract
 
-// HTTPRequest is what the worker sends to the downstream API.
-type HTTPRequest struct {
-	Method  string
-	URL     string
-	Headers map[string]string
-	Body    []byte
-	APIKey  string // decrypted key value
-}
-
-// HTTPResponse is what the worker gets back.
-type HTTPResponse struct {
-	StatusCode int
-	Body       []byte
-}
-
-// Worker processes one queue item at a time in its own goroutine.
+// Worker processes queue items by executing scripts.
 type Worker struct {
-	id     int
-	queue  *queue.Queue
-	pool   *keypool.Manager
-	client HTTPClient
-	dbAdap db.DBAdapter
-	hotCfg *config.HotReloadConfig
-	encKey string // encryption key for decrypting API keys
-	logger zerolog.Logger
+	id           int
+	queue        *queue.Queue
+	pool         *keypool.Manager
+	dbAdap       db.DBAdapter
+	getContracts ContractsFunc
+	encKey       string
+	logger       zerolog.Logger
 }
 
-// NewWorker creates a worker with all its dependencies.
+// NewWorker creates a worker with all dependencies.
 func NewWorker(
 	id int,
 	q *queue.Queue,
 	pool *keypool.Manager,
-	client HTTPClient,
 	dbAdap db.DBAdapter,
-	hotCfg *config.HotReloadConfig,
+	getContracts ContractsFunc,
 	encKey string,
 	logger zerolog.Logger,
 ) *Worker {
 	return &Worker{
-		id:     id,
-		queue:  q,
-		pool:   pool,
-		client: client,
-		dbAdap: dbAdap,
-		hotCfg: hotCfg,
-		encKey: encKey,
-		logger: logger.With().Int("worker_id", id).Logger(),
+		id:           id,
+		queue:        q,
+		pool:         pool,
+		dbAdap:       dbAdap,
+		getContracts: getContracts,
+		encKey:       encKey,
+		logger:       logger.With().Int("worker_id", id).Logger(),
 	}
 }
 
-// Start begins the worker loop. It reads from the queue channel
-// and processes each item until the context is cancelled.
+// Start begins the worker loop.
 func (w *Worker) Start(ctx context.Context) {
 	w.logger.Debug().Msg("worker started")
 
@@ -79,7 +63,6 @@ func (w *Worker) Start(ctx context.Context) {
 		case <-ctx.Done():
 			w.logger.Debug().Msg("worker stopped")
 			return
-
 		case item, ok := <-w.queue.Dequeue():
 			if !ok {
 				w.logger.Debug().Msg("queue closed, worker stopping")
@@ -90,153 +73,165 @@ func (w *Worker) Start(ctx context.Context) {
 	}
 }
 
-// processItem handles a single queue item end to end:
-//  1. Load the request from DB
-//  2. Get a key from the pool
-//  3. Decrypt the key
-//  4. Make the HTTP call
-//  5. Handle success or failure (retry if needed)
 func (w *Worker) processItem(ctx context.Context, item *queue.Item) {
-	log := w.logger.With().Str("request_id", item.RequestID).Logger()
+	log := w.logger.With().Str("execution_id", item.ExecutionID).Logger()
 
-	// 1. Load full request from database
+	// 1. Load execution from DB
 	dbCtx, cancel := util.DBContext(ctx, util.DBTimeoutLong)
-	defer cancel()
+	exec, err := w.dbAdap.GetExecution(dbCtx, item.ExecutionID)
+	cancel()
 
-	req, err := w.dbAdap.GetRequest(dbCtx, item.RequestID)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to load request from database")
+		log.Error().Err(err).Msg("failed to load execution")
 		return
 	}
-	if req == nil {
-		log.Warn().Msg("request not found in database, skipping")
+	if exec == nil {
+		log.Warn().Msg("execution not found, skipping")
+		return
+	}
+	if exec.Status == db.StatusSuccess || exec.Status == db.StatusFailed {
 		return
 	}
 
-	// Skip if already completed or failed permanently
-	if req.Status == db.RequestStatusSuccess || req.Status == db.RequestStatusFailed {
+	// 2. Look up contract
+	c, ok := w.getContracts()[exec.Script]
+	if !ok {
+		log.Error().Str("script", exec.Script).Msg("contract not found")
+		w.failExecution(ctx, exec, "contract not found for script: "+exec.Script)
 		return
 	}
 
-	// 2. Get a key from the pool
-	key := w.pool.GetKey()
+	fn, ok := c.Functions[exec.FunctionName]
+	if !ok {
+		log.Error().Str("function", exec.FunctionName).Msg("function not found in contract")
+		w.failExecution(ctx, exec, "function not found: "+exec.FunctionName)
+		return
+	}
+
+	// 3. Get a key for the feature
+	key := w.pool.GetKeyForFeature(item.Feature)
 	if key == nil {
-		log.Warn().Msg("no key available, re-queuing request")
-		w.requeueWithDelay(ctx, item, req)
+		log.Warn().Str("feature", item.Feature).Msg("no key available, re-queuing")
+		w.requeueWithDelay(ctx, item, exec.Attempts)
 		return
 	}
 
-	// 3. Mark request as processing
+	// 4. Mark as running
 	dbCtx2, cancel2 := util.DBContext(ctx, util.DBTimeoutShort)
-	defer cancel2()
-	_ = w.dbAdap.UpdateRequestStatus(dbCtx2, req.ID, db.RequestStatusProcessing, key.ID, req.Attempts+1)
+	_ = w.dbAdap.UpdateExecutionStatus(dbCtx2, exec.ID, db.StatusRunning, key.ID, exec.Attempts+1)
+	cancel2()
 
-	// 4. Decrypt the key
+	// 5. Decrypt key
 	decryptedKey, err := crypto.Decrypt(key.KeyEncrypted, w.encKey)
 	if err != nil {
-		log.Error().Err(err).Str("key_id", key.ID).Msg("failed to decrypt API key")
-		w.pool.ReleaseKey(key)
-		w.handleFailure(ctx, item, req, key, "decryption failed: "+err.Error())
+		log.Error().Err(err).Str("key_id", key.ID).Msg("failed to decrypt key")
+		w.handleFailure(ctx, item, exec, fn, "decryption failed: "+err.Error())
 		return
 	}
 
-	// 5. Build and execute the HTTP request
-	httpReq := &HTTPRequest{
-		Method: req.Method,
-		URL:    req.DestinationURL,
-		APIKey: decryptedKey,
-	}
-	if req.Headers != nil {
-		httpReq.Headers = util.ParseJSONMap(*req.Headers)
-	}
-	if req.Payload != nil {
-		httpReq.Body = []byte(*req.Payload)
+	// 6. Execute script
+	inputJSON := "{}"
+	if exec.Input != nil {
+		inputJSON = *exec.Input
 	}
 
-	resp, err := w.client.Do(ctx, httpReq)
-
-	// Always release the key's concurrent slot
-	w.pool.ReleaseKey(key)
-
-	// 6. Handle result
+	result, err := runner.Run(ctx, c, exec.FunctionName, decryptedKey, inputJSON)
 	if err != nil {
-		log.Warn().Err(err).Str("key_id", key.ID).Msg("HTTP request failed")
-		w.pool.MarkFailed(key)
-		w.handleFailure(ctx, item, req, key, err.Error())
+		log.Warn().Err(err).Msg("script execution failed")
+		w.handleFailure(ctx, item, exec, fn, err.Error())
 		return
 	}
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		w.handleSuccess(ctx, req, key, resp)
-	} else if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-		// Rate limited or server error — retryable
-		log.Warn().
-			Int("status_code", resp.StatusCode).
-			Str("key_id", key.ID).
-			Msg("retryable HTTP error")
-		w.pool.MarkFailed(key)
-		w.handleFailure(ctx, item, req, key, string(resp.Body))
+	// 7. Handle result
+	if result.Success {
+		w.handleSuccess(ctx, exec, result)
 	} else {
-		// 4xx (except 429) — permanent failure, don't retry
-		log.Warn().
-			Int("status_code", resp.StatusCode).
-			Str("key_id", key.ID).
-			Msg("permanent HTTP error, not retrying")
-		w.pool.MarkSuccess(key) // key itself is fine, request is bad
-		w.persistResult(ctx, req.ID, db.RequestStatusFailed, resp.StatusCode, string(resp.Body), "")
+		w.handleFailure(ctx, item, exec, fn, result.Error)
 	}
 }
 
-// handleSuccess persists the successful result and marks the key healthy.
-func (w *Worker) handleSuccess(ctx context.Context, req *db.Request, key *keypool.PoolKey, resp *HTTPResponse) {
-	w.pool.MarkSuccess(key)
-	w.persistResult(ctx, req.ID, db.RequestStatusSuccess, resp.StatusCode, string(resp.Body), "")
+func (w *Worker) handleSuccess(ctx context.Context, exec *db.Execution, result *runner.Result) {
+	output := string(result.Data)
+
+	dbCtx, cancel := util.DBContext(ctx, util.DBTimeoutShort)
+	defer cancel()
+	_ = w.dbAdap.UpdateExecutionResult(dbCtx, exec.ID, db.StatusSuccess, output, "", time.Now().UTC())
+
+	// Fire webhook if callback URL is set
+	if exec.CallbackURL != nil && *exec.CallbackURL != "" {
+		payload := map[string]any{
+			"execution_id": exec.ID,
+			"status":       db.StatusSuccess,
+			"output":       json.RawMessage(output),
+		}
+		webhook.Send(ctx, *exec.CallbackURL, payload, w.logger)
+	}
 }
 
-// handleFailure decides whether to retry or permanently fail the request.
-func (w *Worker) handleFailure(ctx context.Context, item *queue.Item, req *db.Request, key *keypool.PoolKey, errMsg string) {
-	attempts := req.Attempts + 1
+func (w *Worker) handleFailure(ctx context.Context, item *queue.Item, exec *db.Execution, fn *contract.Function, errMsg string) {
+	attempts := exec.Attempts + 1
 
-	if ShouldRetry(attempts, w.hotCfg) {
+	if fn.Retry.Enabled && attempts < fn.Retry.MaxAttempts {
 		w.logger.Info().
-			Str("request_id", req.ID).
+			Str("execution_id", exec.ID).
 			Int("attempt", attempts).
 			Msg("scheduling retry")
 
-		delay := CalculateBackoff(attempts-1, w.hotCfg)
-		w.delayedEnqueue(ctx, item, req.ID, delay)
-	} else {
-		// Max retries exhausted — mark as permanently failed
-		w.logger.Warn().
-			Str("request_id", req.ID).
-			Int("attempts", attempts).
-			Msg("request permanently failed after max retries")
+		// Mark as retrying
+		dbCtx, cancel := util.DBContext(ctx, util.DBTimeoutShort)
+		_ = w.dbAdap.UpdateExecutionStatus(dbCtx, exec.ID, db.StatusRetrying, "", attempts)
+		cancel()
 
-		w.persistResult(ctx, req.ID, db.RequestStatusFailed, 0, "", errMsg)
+		delay := calculateBackoff(attempts - 1)
+		w.delayedEnqueue(ctx, item, delay)
+	} else {
+		w.logger.Warn().
+			Str("execution_id", exec.ID).
+			Int("attempts", attempts).
+			Msg("execution permanently failed")
+
+		dbCtx, cancel := util.DBContext(ctx, util.DBTimeoutShort)
+		_ = w.dbAdap.UpdateExecutionResult(dbCtx, exec.ID, db.StatusFailed, "", errMsg, time.Now().UTC())
+		cancel()
+
+		// Insert into dead letter
+		dl := &db.DeadLetter{
+			ID:           uuid.New().String(),
+			ExecutionID:  exec.ID,
+			Script:       exec.Script,
+			FunctionName: exec.FunctionName,
+			Input:        exec.Input,
+			Error:        &errMsg,
+			Attempts:     attempts,
+		}
+		dbCtx2, cancel2 := util.DBContext(ctx, util.DBTimeoutShort)
+		_ = w.dbAdap.CreateDeadLetter(dbCtx2, dl)
+		cancel2()
+
+		// Fire webhook on final failure
+		if exec.CallbackURL != nil && *exec.CallbackURL != "" {
+			payload := map[string]any{
+				"execution_id": exec.ID,
+				"status":       db.StatusFailed,
+				"error":        errMsg,
+			}
+			webhook.Send(ctx, *exec.CallbackURL, payload, w.logger)
+		}
 	}
 }
 
-// persistResult writes the final result to the database (best effort).
-func (w *Worker) persistResult(ctx context.Context, requestID, status string, responseStatus int, responseBody, lastError string) {
+func (w *Worker) failExecution(ctx context.Context, exec *db.Execution, errMsg string) {
 	dbCtx, cancel := util.DBContext(ctx, util.DBTimeoutShort)
 	defer cancel()
-
-	_ = w.dbAdap.UpdateRequestResult(
-		dbCtx, requestID, status,
-		responseStatus, responseBody, lastError,
-		time.Now().UTC(),
-	)
+	_ = w.dbAdap.UpdateExecutionResult(dbCtx, exec.ID, db.StatusFailed, "", errMsg, time.Now().UTC())
 }
 
-// requeueWithDelay re-queues a request after a short delay when no key is available.
-func (w *Worker) requeueWithDelay(ctx context.Context, item *queue.Item, req *db.Request) {
-	delay := CalculateBackoff(0, w.hotCfg)
-	w.delayedEnqueue(ctx, item, req.ID, delay)
+func (w *Worker) requeueWithDelay(ctx context.Context, item *queue.Item, attempts int) {
+	delay := calculateBackoff(attempts)
+	w.delayedEnqueue(ctx, item, delay)
 }
 
-// delayedEnqueue waits for the given delay then puts the item back in the queue.
-// Runs in a separate goroutine so the worker isn't blocked.
-func (w *Worker) delayedEnqueue(ctx context.Context, item *queue.Item, requestID string, delay time.Duration) {
+func (w *Worker) delayedEnqueue(ctx context.Context, item *queue.Item, delay time.Duration) {
 	go func() {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
@@ -247,9 +242,28 @@ func (w *Worker) delayedEnqueue(ctx context.Context, item *queue.Item, requestID
 		case <-timer.C:
 			if err := w.queue.Enqueue(item); err != nil {
 				w.logger.Error().Err(err).
-					Str("request_id", requestID).
-					Msg("failed to re-queue request")
+					Str("execution_id", item.ExecutionID).
+					Msg("failed to re-queue")
 			}
 		}
 	}()
+}
+
+// calculateBackoff returns exponential backoff with jitter.
+// min(1s * 2^attempt, 30s) + random jitter up to 500ms.
+func calculateBackoff(attempt int) time.Duration {
+	base := time.Second
+	maxDelay := 30 * time.Second
+
+	delay := base
+	for i := 0; i < attempt; i++ {
+		delay *= 2
+		if delay > maxDelay {
+			delay = maxDelay
+			break
+		}
+	}
+
+	jitter := time.Duration(rand.IntN(500)) * time.Millisecond
+	return delay + jitter
 }

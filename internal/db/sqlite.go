@@ -44,15 +44,9 @@ func (s *SQLiteAdapter) Close() error {
 	return s.db.Close()
 }
 
-// boolToInt converts bool to int for SQLite storage
 func boolToInt(b bool) int {
 	if b {
 		return 1
 	}
 	return 0
-}
-
-// intToBool converts int to bool from SQLite storage
-func intToBool(i int) bool {
-	return i != 0
 }

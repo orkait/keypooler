@@ -1,0 +1,76 @@
+# All Source Files with Semantic Descriptions
+# Format: path | lines | description
+
+cmd/main.go | 174 | Application entrypoint. Loads config from env, initializes SQLite+WAL, runs migrations, creates HotReloadConfig, KeyPool Manager, Priority Queue, HTTP Client, Metrics, Worker Pool with staggered warmup. Starts reload loops for keys and config. Runs HTTP server with graceful shutdown on SIGINT/SIGTERM.
+
+internal/api/handlers.go | 501 | All HTTP request handlers. Server struct aggregates DB, Queue, Pool, HotCfg, Cfg, Logger. Handlers: HealthCheck (GET /health), SubmitRequest (POST /api/requests with idempotency), GetRequestStatus, AddKey (encrypts key), ListKeys, DeleteKey, UpdateKeyWeight, ResetKeyCircuit, PoolHealth, GetConfig, UpdateConfig. Helper functions: logKeyEvent, requestToResponse, keyToResponse, extractPathParam.
+
+internal/api/helpers.go | 23 | HTTP response utilities. writeJSON (set Content-Type, encode JSON), writeError (wrap as {"error": msg}), decodeJSON (decode with DisallowUnknownFields).
+
+internal/api/middleware.go | 51 | Two middleware factories. AdminAuth: checks Bearer token with constant-time comparison (crypto/subtle), logs failed attempts. RequestLogger: logs method, path, remote_addr for every request.
+
+internal/api/router.go | 73 | HTTP route registration using stdlib ServeMux. Public routes: /health, /api/requests, /api/requests/{id}. Admin routes (with AdminAuth): /admin/keys, /admin/keys/{id}, /admin/keys/{id}/weight, /admin/keys/{id}/reset, /admin/health, /admin/config. Method-based dispatch via helper functions. RequestLogger wraps entire mux.
+
+internal/config/config.go | 192 | Config struct with 40+ fields loaded from env vars via Load(). Covers: server (port, timeouts), DB (path, conns, busy timeout), security (encryption key, admin token), workers (count, warmup), queue (size, preemption), key pool (strategy, reload interval), circuit breaker (threshold, duration), retry (attempts, delays, jitter), HTTP client (timeout, pool), load shedding (2 thresholds), logging (level, format), metrics (enabled, path). Validates required fields.
+
+internal/config/helpers.go | 69 | Environment variable reading utilities. getEnv (string), getEnvAsInt, getEnvAsBool, getEnvAsFloat, getEnvAsDuration. All return defaults on missing/invalid values.
+
+internal/config/reload.go | 174 | HotReloadConfig with RWMutex for thread-safe runtime config updates. Fields: WorkerCount, QueueMaxSize, Strategy, CircuitBreakerThreshold/OpenDuration, RetryMaxAttempts/BaseDelay/MaxDelay, LoadShedLevel1/2Threshold. Update() reads DB map[string]string, validates, applies changes. StartReloadLoop ticks every interval, reads system_config from DB. DBReader interface prevents circular deps.
+
+internal/config/validators.go | 83 | Validation functions and valid value maps. ValidStrategies: round_robin, weighted_round_robin. ValidLogLevels: debug, info, warn, error. ValidLogFormats: json, pretty. Validators for: encryption key (64 hex chars), admin token (non-empty), DB conns (must be 1), strategy, log level/format, positive ints.
+
+internal/crypto/crypto.go | 99 | AES-256-GCM encryption for API keys at rest. Encrypt: hex-decode 32-byte key, random 12-byte nonce, GCM seal, return hex. Decrypt: hex-decode key+ciphertext, extract nonce, GCM open, return plaintext. All storage in hex encoding.
+
+internal/db/adapter.go | 131 | Core database contract. DBAdapter interface: Close, 9 APIKey ops, 6 Request ops, 2 KeyEvent ops, 2 SystemConfig ops. Data structs: APIKey (14 fields), Request (17 fields), KeyEvent (5 fields). Constants: 5 request statuses, 3 priorities, 3 circuit states, 3 sources, 8 event types.
+
+internal/db/migrations.go | 164 | File-based SQL migration runner. Creates schema_migrations tracking table. Loads NNN_name.sql files from directory, parses version numbers, sorts. Executes pending migrations in transactions. Records applied versions. Idempotent.
+
+internal/db/sqlite.go | 59 | SQLiteAdapter factory. NewSQLiteAdapter: opens with WAL mode + busy timeout, sets MaxOpenConns (1 for SQLite), pings. Exports DB() for migrations. Helpers: boolToInt/intToBool for SQLite boolean mapping.
+
+internal/db/sqlite_config.go | 98 | System config and key events DB operations. CreateKeyEvent (INSERT), GetKeyEvents (SELECT with LIMIT, ordered by created_at DESC). GetSystemConfig (SELECT all key-value pairs), UpdateSystemConfig (UPSERT with ON CONFLICT). execExpectingOneRow helper validates exactly 1 row affected.
+
+internal/db/sqlite_keys.go | 170 | API key CRUD. CreateAPIKey, GetAPIKey (by ID), GetAllAPIKeys (ordered by created_at). UpdateAPIKeyWeight, UpdateAPIKeyHealth (is_healthy + failure_count + circuit_state), UpdateAPIKeyLastUsed, UpdateAPIKeyConcurrent (delta +1/-1), DeleteAPIKey, ResetAPIKeyCircuit. scanAPIKey/scanAPIKeyFromRows handle nullable last_used_at and bool conversion.
+
+internal/db/sqlite_requests.go | 199 | Request CRUD. CreateRequest, GetRequest (by ID), GetRequestByIdempotencyKey (returns nil,nil if not found). UpdateRequestStatus (status + assigned_key + attempts), UpdateRequestResult (status + response + error + completed_at). GetPendingRequests (WHERE status IN pending/queued, ORDER BY priority ASC, created_at ASC). Handles 8 nullable fields via sql.Null* types -> pointer conversion.
+
+internal/httpclient/client.go | 77 | HTTP client for downstream API calls. NewClient: configures Transport with connection pooling (MaxIdleConns, MaxIdleConnsPerHost, IdleConnTimeout). Do(ctx, HTTPRequest) -> HTTPResponse: sets Authorization Bearer header, applies custom headers, auto-sets Content-Type to application/json if body present. Implements worker.HTTPClient interface.
+
+internal/keypool/circuitbreaker.go | 113 | Per-key circuit breaker state machine. States: Closed (allow all) -> Open (block, after threshold failures) -> Half-Open (allow probe after openDuration). AllowRequest, RecordSuccess (->Closed), RecordFailure (may ->Open), Reset. Thread-safe via sync.Mutex.
+
+internal/keypool/manager.go | 355 | Central key pool orchestrator. NewManager: registers RR + WRR strategies, loads keys from DB. GetKey: filters available keys (circuit breaker allows + under concurrency limit + rate limit passes), applies strategy, calls TryConcurrentAcquire. ReleaseKey, MarkSuccess (close circuit, persist), MarkFailed (open circuit, persist). StartReloadLoop: periodically reloads keys from DB preserving runtime state, checks strategy changes. Thread-safe via RWMutex.
+
+internal/keypool/roundrobin.go | 44 | Round-robin key selection. Counter-based: Select returns keys[counter % len], increments counter. Thread-safe via Mutex. Implements KeySelectionStrategy.
+
+internal/keypool/strategy.go | 20 | KeySelectionStrategy interface: Name() string, Select(keys) *PoolKey, Reset(). Abstraction for pluggable selection algorithms.
+
+internal/keypool/types.go | 90 | PoolKey: API key with runtime state. Fields: identity, weight, rate limits, concurrency tracking, circuit breaker. TryConcurrentAcquire (check+increment if under limit), ConcurrentRelease (decrement, floor 0), TryRateLimit (per-minute + per-day windows with auto-reset), GetCurrentConcurrent. Thread-safe via Mutex.
+
+internal/keypool/weightedrr.go | 76 | Smooth weighted round-robin. Maintains currentWeights map per key. Select: add configured weight to current weight for all keys, pick highest, subtract total weight from winner. Produces even distribution (e.g., weights 5,1,1 -> A,A,B,A,C,A,A not AAAAA,B,C). Implements KeySelectionStrategy.
+
+internal/metrics/metrics.go | 152 | Prometheus-format metrics. Atomic counters: RequestsSubmitted/Completed/Failed/Retried. Gauges: QueueSize, ActiveWorkers, TotalWorkers, TotalKeys, HealthyKeys. StatusCodes map with double-check locking. Latency tracking (total + count for avg). Handler() returns HTTP handler writing Prometheus text exposition format.
+
+internal/queue/priority_queue.go | 45 | Min-heap implementing container/heap.Interface. Less: lower Priority number wins, then earlier CreatedAt (FIFO within same priority). Push/Pop manage index field. Used internally by Queue.
+
+internal/queue/queue.go | 200 | Bounded priority queue with dispatch. Enqueue: add to heap, preempt lowest-priority if full. dispatchLoop goroutine: waits on notify channel, pops from heap, sends to dequeue channel. Dequeue returns read-only channel for workers. Close with sync.Once, drains remaining items. ErrQueueFull, ErrQueueClosed sentinels.
+
+internal/queue/types.go | 14 | Queue Item: RequestID (string), Priority (int, lower=higher), CreatedAt (time.Time), index (heap internal).
+
+internal/util/context.go | 15 | DB timeout helpers. DBTimeoutShort (2s) for quick ops, DBTimeoutLong (5s) for full requests. DBContext(parent, timeout) creates child context with deadline.
+
+internal/util/json.go | 15 | ParseJSONMap: safely parses JSON string to map[string]string. Returns empty map on empty input or error.
+
+internal/worker/pool.go | 84 | Worker pool manager. NewPool creates N workers with shared deps. Start launches workers with staggered delay (warmupPeriod / count between each). Wait blocks until all workers finish via WaitGroup.
+
+internal/worker/retry.go | 36 | Retry logic. CalculateBackoff: min(base * 2^attempt, max) + random(0, 0.5*base). ShouldRetry: attempts < maxAttempts. Both read from HotReloadConfig for runtime tunability.
+
+internal/worker/worker.go | 256 | Core request processor. Start: loop reading from queue channel. processItem: load request from DB, skip if done, get key (requeue if none), mark processing, decrypt key, build HTTP request, execute, release key, handle result. handleSuccess: mark key healthy, persist. handleFailure: retry with backoff or permanent fail. HTTP status: 2xx=success, 429/5xx=retryable, other 4xx=permanent.
+
+migrations/001_create_api_keys.sql | 18 | Creates api_keys table: id, name, key_encrypted, weight, is_healthy, failure_count, circuit_state, last_used_at, rate_limit_per_minute (60), rate_limit_per_day (10000), concurrent_limit (5), current_concurrent (0), created_at, updated_at.
+
+migrations/002_create_requests.sql | 26 | Creates requests table: id, idempotency_key (UNIQUE), source, priority, method, destination_url, headers, payload, status, assigned_key_id, attempts, last_error, response_status, response_body, created_at, updated_at, completed_at. Indexes: status, idempotency_key, created_at.
+
+migrations/003_create_key_events.sql | 12 | Creates key_events table: id, key_id, event_type, message, created_at. Index on key_id.
+
+migrations/004_create_system_config.sql | 7 | Creates system_config table: key (PK), value, description, updated_at.
+
+migrations/005_seed_system_config.sql | 13 | Seeds defaults: worker_count=10, queue_max_size=1000, strategy=round_robin, circuit_breaker_threshold=3, circuit_breaker_open_duration_seconds=60, retry_max_attempts=4, retry_base_delay_ms=1000, retry_max_delay_ms=30000, load_shed_level1=0.50, load_shed_level2=0.25. Uses INSERT OR IGNORE.

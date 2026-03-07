@@ -2,13 +2,7 @@ package config
 
 import "fmt"
 
-// Valid values for various configuration options
 var (
-	ValidStrategies = map[string]bool{
-		"round_robin":          true,
-		"weighted_round_robin": true,
-	}
-
 	ValidLogLevels = map[string]bool{
 		"debug": true,
 		"info":  true,
@@ -45,14 +39,6 @@ func validateAdminToken(token string) error {
 func validateDBMaxOpenConns(conns int) error {
 	if conns != 1 {
 		return fmt.Errorf("DB_MAX_OPEN_CONNS must be 1 for SQLite, got %d", conns)
-	}
-	return nil
-}
-
-// validateStrategy checks if the key selection strategy is valid
-func validateStrategy(strategy string) error {
-	if !ValidStrategies[strategy] {
-		return fmt.Errorf("KEY_POOL_STRATEGY must be one of: round_robin, weighted_round_robin, got: %s", strategy)
 	}
 	return nil
 }

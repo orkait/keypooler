@@ -1,0 +1,9 @@
+# Root-Level Files
+
+.env.example          | 159 lines | Complete env var reference with inline docs for all 30+ config params
+.gitignore            | 32 lines  | Excludes: binaries, SQLite files, .env, IDE files, OS metadata, vendor/
+Dockerfile            | 38 lines  | Multi-stage build: golang:1.22-bookworm (build with CGO) -> debian:bookworm-slim (runtime with libsqlite3)
+README.md             | 790 lines | Full project docs: architecture, design decisions (13), API reference, testing guide, config reference
+docker-compose.yml    | 22 lines  | Single service, port mapping, .env file, named volume (pool-data -> /app/data), healthcheck via wget /health
+go.mod                | 14 lines  | Module: key-pool-system, Go 1.22.2, deps: go-sqlite3 (direct), zerolog + uuid (indirect)
+go.sum                |           | Dependency checksums

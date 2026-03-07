@@ -1,13 +1,7 @@
 package queue
 
-import "time"
-
-// Item wraps a request ID with metadata needed for priority ordering.
-// The actual request data lives in the database - the queue only tracks
-// what needs to be processed and in what order.
+// Item represents a unit of work in the queue.
 type Item struct {
-	RequestID string
-	Priority  int
-	CreatedAt time.Time
-	index     int
+	ExecutionID string
+	Feature     string // which feature this execution needs (for key selection)
 }

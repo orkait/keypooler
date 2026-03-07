@@ -5,54 +5,43 @@ import (
 	"sync"
 	"time"
 
-	"key-pool-system/internal/config"
 	"key-pool-system/internal/db"
 	"key-pool-system/internal/keypool"
 	"key-pool-system/internal/queue"
+
 	"github.com/rs/zerolog"
 )
 
-// Pool manages a group of workers that process queue items concurrently.
+// Pool manages a group of worker goroutines.
 type Pool struct {
 	workers []*Worker
 	wg      sync.WaitGroup
 	logger  zerolog.Logger
 }
 
-// NewPool creates a pool of workers. Workers are created but not started.
+// NewPool creates a pool of workers.
 func NewPool(
 	count int,
 	q *queue.Queue,
 	keyPool *keypool.Manager,
-	client HTTPClient,
 	dbAdap db.DBAdapter,
-	hotCfg *config.HotReloadConfig,
+	getContracts ContractsFunc,
 	encKey string,
 	logger zerolog.Logger,
 ) *Pool {
-	p := &Pool{
-		workers: make([]*Worker, count),
-		logger:  logger.With().Str("component", "worker_pool").Logger(),
-	}
-
+	workers := make([]*Worker, count)
 	for i := 0; i < count; i++ {
-		p.workers[i] = NewWorker(i, q, keyPool, client, dbAdap, hotCfg, encKey, logger)
+		workers[i] = NewWorker(i, q, keyPool, dbAdap, getContracts, encKey, logger)
 	}
-
-	return p
+	return &Pool{
+		workers: workers,
+		logger:  logger.With().Str("component", "pool").Logger(),
+	}
 }
 
-// Start launches all workers with a warmup delay between each.
-// Workers start one by one with a small delay to avoid a thundering herd
-// of database reads and HTTP connections at startup.
-//
-// warmupPeriod is the total time to spread worker startups over.
-// For example, 10 workers with 30s warmup = one worker every 3 seconds.
+// Start launches all workers with staggered startup.
 func (p *Pool) Start(ctx context.Context, warmupPeriod time.Duration) {
-	delay := time.Duration(0)
-	if len(p.workers) > 1 {
-		delay = warmupPeriod / time.Duration(len(p.workers))
-	}
+	delay := warmupPeriod / time.Duration(len(p.workers))
 
 	for i, w := range p.workers {
 		p.wg.Add(1)
@@ -69,15 +58,9 @@ func (p *Pool) Start(ctx context.Context, warmupPeriod time.Duration) {
 			}
 		}
 	}
-
-	p.logger.Info().
-		Int("worker_count", len(p.workers)).
-		Dur("warmup_period", warmupPeriod).
-		Msg("all workers started")
 }
 
-// Wait blocks until all workers have finished.
+// Wait blocks until all workers finish.
 func (p *Pool) Wait() {
 	p.wg.Wait()
-	p.logger.Info().Msg("all workers stopped")
 }

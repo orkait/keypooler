@@ -20,7 +20,7 @@ RUN CGO_ENABLED=1 go build -o /app/key-pool-system ./cmd/
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libsqlite3-0 \
+    ca-certificates libsqlite3-0 python3 nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
