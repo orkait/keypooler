@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Config holds all application configuration loaded from environment variables.
+// Config holds all keypooler configuration loaded from environment variables.
 type Config struct {
 	// Server
 	ServerPort            int
@@ -22,20 +22,6 @@ type Config struct {
 	// Security
 	EncryptionKey string
 	AdminToken    string
-
-	// Worker pool
-	WorkerCount        int
-	WorkerWarmupPeriod time.Duration
-
-	// Queue
-	QueueMaxSize int
-
-	// Scripts
-	ScriptsPath string
-
-	// Runner
-	RunnerMode  string // "auto", "local", "docker"
-	RunnerImage string
 
 	// Logging
 	LogLevel    string
@@ -58,16 +44,6 @@ func Load() (*Config, error) {
 
 		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
 		AdminToken:    getEnv("ADMIN_TOKEN", ""),
-
-		WorkerCount:        getEnvAsInt("WORKER_COUNT", 10),
-		WorkerWarmupPeriod: getEnvAsDuration("WORKER_WARMUP_SECONDS", 30, time.Second),
-
-		QueueMaxSize: getEnvAsInt("QUEUE_MAX_SIZE", 1000),
-
-		ScriptsPath: getEnv("SCRIPTS_PATH", "./scripts"),
-
-		RunnerMode:  getEnv("RUNNER_MODE", "docker"),
-		RunnerImage: getEnv("RUNNER_IMAGE", "keypooler-runtime"),
 
 		LogLevel:    getEnv("LOG_LEVEL", "info"),
 		LogFormat:   getEnv("LOG_FORMAT", "json"),
@@ -95,12 +71,6 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := validateLogFormat(c.LogFormat); err != nil {
-		return err
-	}
-	if err := validatePositiveInt("WORKER_COUNT", c.WorkerCount); err != nil {
-		return err
-	}
-	if err := validatePositiveInt("QUEUE_MAX_SIZE", c.QueueMaxSize); err != nil {
 		return err
 	}
 	return nil

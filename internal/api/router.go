@@ -4,24 +4,22 @@ import (
 	"net/http"
 )
 
-// NewRouter creates the HTTP mux with all routes.
+// NewRouter creates the HTTP mux with all keypooler routes.
 func NewRouter(srv *Server) http.Handler {
 	mux := http.NewServeMux()
 
 	// Public
 	mux.HandleFunc("/health", srv.HealthCheck)
-	mux.HandleFunc("/api/execute", srv.Execute)
-	mux.HandleFunc("/api/executions/", srv.GetExecution)
 
-	// Admin (auth required)
+	// Key acquisition (used by pulse workers — admin-token protected)
 	admin := AdminAuth(srv.Cfg.AdminToken, srv.Logger)
+	mux.Handle("/key", admin(http.HandlerFunc(srv.GetKey)))
+
+	// Admin
 	mux.Handle("/admin/tiers", admin(http.HandlerFunc(srv.routeTiers)))
 	mux.Handle("/admin/keys", admin(http.HandlerFunc(srv.routeKeys)))
 	mux.Handle("/admin/keys/", admin(http.HandlerFunc(srv.DeleteKey)))
 	mux.Handle("/admin/health", admin(http.HandlerFunc(srv.Health)))
-	mux.Handle("/admin/scripts/scan", admin(http.HandlerFunc(srv.ScanScripts)))
-	mux.Handle("/admin/dead-letter", admin(http.HandlerFunc(srv.GetDeadLetters)))
-	mux.Handle("/admin/dead-letter/", admin(http.HandlerFunc(srv.RetryDeadLetter)))
 
 	return RequestLogger(srv.Logger)(mux)
 }
