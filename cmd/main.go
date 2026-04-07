@@ -7,17 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"key-pool-system/internal/api"
 	"key-pool-system/internal/config"
 	"key-pool-system/internal/db"
-	"key-pool-system/internal/executor"
 	"key-pool-system/internal/keypool"
-	"key-pool-system/internal/queue"
-	"key-pool-system/internal/scheduler"
 	"key-pool-system/internal/util"
-	"key-pool-system/internal/worker"
 
 	"github.com/rs/zerolog"
 )
@@ -54,48 +49,12 @@ func main() {
 	}
 	logger.Info().Int("pool_size", poolMgr.PoolSize()).Msg("key pool initialized")
 
-	// Queue
-	q := queue.NewQueue(cfg.QueueMaxSize)
-
-	// Scheduler
-	sched := scheduler.New(q, dbAdapter, logger)
-	ctx, cancel = util.DBContext(context.Background(), util.DBTimeoutLong)
-	if err := sched.LoadFromDatabase(ctx); err != nil {
-		cancel()
-		logger.Fatal().Err(err).Msg("failed to load scheduled integrations")
-	}
-	cancel()
-
-	// Root context
-	rootCtx, rootCancel := context.WithCancel(context.Background())
-	defer rootCancel()
-
-	// HTTP server (created before workers so workers can use srv.GetContracts)
 	srv := &api.Server{
-		DB:        dbAdapter,
-		Queue:     q,
-		Pool:      poolMgr,
-		Cfg:       cfg,
-		Scheduler: sched,
-		Logger:    logger,
+		DB:     dbAdapter,
+		Pool:   poolMgr,
+		Cfg:    cfg,
+		Logger: logger,
 	}
-
-	execClient := executor.NewRustboxClient(
-		cfg.RustboxURL,
-		cfg.RustboxAPIKey,
-		time.Duration(cfg.RustboxTimeoutSec)*time.Second,
-	)
-	logger.Info().Str("rustbox_url", cfg.RustboxURL).Msg("rustbox executor configured")
-
-	// Worker pool
-	workerPool := worker.NewPool(
-		cfg.WorkerCount, q, poolMgr, dbAdapter, execClient, cfg.EncryptionKey, logger,
-	)
-	workerPool.Start(rootCtx, cfg.WorkerWarmupPeriod)
-	logger.Info().Int("workers", cfg.WorkerCount).Msg("worker pool started")
-
-	// Start scheduler
-	go sched.Start(rootCtx)
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.ServerPort),
@@ -112,7 +71,6 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigChan
@@ -125,9 +83,6 @@ func main() {
 		logger.Error().Err(err).Msg("HTTP server shutdown error")
 	}
 
-	rootCancel()
-	workerPool.Wait()
-	q.Close()
 	logger.Info().Msg("keypooler stopped")
 }
 

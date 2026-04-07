@@ -5,7 +5,9 @@ import (
 	"time"
 )
 
-// DBAdapter defines the interface for all database operations.
+// DBAdapter defines the interface for keypooler database operations.
+// Keypooler owns tiers, tier features, and API keys.
+// Executions, integrations, and dead letters are owned by pulse.
 type DBAdapter interface {
 	Close() error
 
@@ -27,27 +29,6 @@ type DBAdapter interface {
 	GetKeysByTier(ctx context.Context, tierID string) ([]*Key, error)
 	DeleteKey(ctx context.Context, id string) error
 	SetKeyActive(ctx context.Context, id string, active bool) error
-
-	// Executions
-	CreateExecution(ctx context.Context, exec *Execution) error
-	GetExecution(ctx context.Context, id string) (*Execution, error)
-	UpdateExecutionStatus(ctx context.Context, id, status, keyID string, attempts int) error
-	UpdateExecutionResult(ctx context.Context, id, status, output, errMsg string, completedAt time.Time) error
-	GetExecutionsByStatus(ctx context.Context, status string, limit int) ([]*Execution, error)
-
-	// Integrations
-	CreateIntegrationVersion(ctx context.Context, version *IntegrationVersion) (*IntegrationVersion, error)
-	GetIntegrationVersion(ctx context.Context, id string) (*IntegrationVersion, error)
-	GetActiveIntegrationVersion(ctx context.Context, integrationName, functionName string) (*IntegrationVersion, error)
-	ListIntegrationVersions(ctx context.Context, integrationName, functionName string) ([]*IntegrationVersion, error)
-	ListActiveIntegrationVersions(ctx context.Context) ([]*IntegrationVersion, error)
-	ActivateIntegrationVersion(ctx context.Context, id string) error
-
-	// Dead Letter
-	CreateDeadLetter(ctx context.Context, dl *DeadLetter) error
-	GetDeadLetters(ctx context.Context, limit int) ([]*DeadLetter, error)
-	GetDeadLetter(ctx context.Context, id string) (*DeadLetter, error)
-	DeleteDeadLetter(ctx context.Context, id string) error
 }
 
 // Tier represents a key tier with feature rate limits.
@@ -73,73 +54,3 @@ type Key struct {
 	IsActive     bool
 	CreatedAt    time.Time
 }
-
-// Execution represents a script execution.
-type Execution struct {
-	ID           string
-	Script       string
-	FunctionName string
-	VersionID    *string
-	KeyID        *string
-	Status       string
-	TriggerType  string
-	CallbackURL  *string
-	Input        *string
-	Output       *string
-	Error        *string
-	Attempts     int
-	CreatedAt    time.Time
-	CompletedAt  *time.Time
-}
-
-// DeadLetter represents a failed execution in the dead letter queue.
-type DeadLetter struct {
-	ID           string
-	ExecutionID  string
-	Script       string
-	FunctionName string
-	VersionID    *string
-	Input        *string
-	Error        *string
-	Attempts     int
-	FailedAt     time.Time
-}
-
-// IntegrationVersion represents a single immutable version of an integration function.
-type IntegrationVersion struct {
-	ID              string
-	IntegrationName string
-	FunctionName    string
-	Version         int
-	Runtime         string
-	Feature         string
-	ContractJSON    string
-	Code            string
-	Status          string
-	Checksum        string
-	CreatedBy       string
-	CreatedAt       time.Time
-	ActivatedAt     *time.Time
-}
-
-// Execution status constants.
-const (
-	StatusPending  = "pending"
-	StatusRunning  = "running"
-	StatusSuccess  = "success"
-	StatusFailed   = "failed"
-	StatusRetrying = "retrying"
-)
-
-// Trigger type constants.
-const (
-	TriggerAPI      = "api"
-	TriggerSchedule = "schedule"
-)
-
-// Integration version status constants.
-const (
-	IntegrationVersionStatusDraft    = "draft"
-	IntegrationVersionStatusActive   = "active"
-	IntegrationVersionStatusDisabled = "disabled"
-)
