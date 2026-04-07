@@ -61,6 +61,10 @@ type stdinEnvelope struct {
 }
 
 func (c *Client) Execute(ctx context.Context, version *db.IntegrationVersion, fn *contract.Function, selectedKey, inputJSON string) (*Result, error) {
+	return c.ExecuteWithID(ctx, "", version, fn, selectedKey, inputJSON)
+}
+
+func (c *Client) ExecuteWithID(ctx context.Context, executionID string, version *db.IntegrationVersion, fn *contract.Function, selectedKey, inputJSON string) (*Result, error) {
 	if version == nil {
 		return nil, fmt.Errorf("integration version is required")
 	}
@@ -90,7 +94,7 @@ func (c *Client) Execute(ctx context.Context, version *db.IntegrationVersion, fn
 	}
 
 	reqBody, err := json.Marshal(submitRequest{
-		Language: version.Runtime,
+		Language: normalizedRuntime(version.Runtime),
 		Code:     version.Code,
 		Stdin:    string(stdinBytes),
 	})
@@ -98,20 +102,23 @@ func (c *Client) Execute(ctx context.Context, version *db.IntegrationVersion, fn
 		return nil, fmt.Errorf("failed to encode rustbox request: %w", err)
 	}
 
-	result, err := c.submitWait(execCtx, reqBody)
+	result, err := c.submitWait(execCtx, executionID, reqBody)
 	if err != nil {
 		return nil, err
 	}
 	return parseProgramResult(result)
 }
 
-func (c *Client) submitWait(ctx context.Context, body []byte) (*resultEnvelope, error) {
+func (c *Client) submitWait(ctx context.Context, executionID string, body []byte) (*resultEnvelope, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/submit?wait=true", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rustbox request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", c.apiKey)
+	if executionID != "" {
+		req.Header.Set("Idempotency-Key", executionID)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -119,15 +126,15 @@ func (c *Client) submitWait(ctx context.Context, body []byte) (*resultEnvelope, 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusRequestTimeout {
+	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusAccepted {
 		var timeoutResp struct {
 			ID string `json:"id"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&timeoutResp); err != nil {
-			return nil, fmt.Errorf("rustbox wait timeout decode failed: %w", err)
+			return nil, fmt.Errorf("rustbox async response decode failed: %w", err)
 		}
 		if timeoutResp.ID == "" {
-			return nil, fmt.Errorf("rustbox wait timed out without submission id")
+			return nil, fmt.Errorf("rustbox async response missing submission id")
 		}
 		return c.pollResult(ctx, timeoutResp.ID)
 	}
@@ -168,6 +175,18 @@ func (c *Client) pollResult(ctx context.Context, id string) (*resultEnvelope, er
 			resp, err := c.httpClient.Do(req)
 			if err != nil {
 				return nil, fmt.Errorf("rustbox poll failed: %w", err)
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				var apiErr struct {
+					Error string `json:"error"`
+				}
+				_ = json.NewDecoder(resp.Body).Decode(&apiErr)
+				resp.Body.Close()
+				if apiErr.Error == "" {
+					apiErr.Error = resp.Status
+				}
+				return nil, fmt.Errorf("rustbox poll error: %s", apiErr.Error)
 			}
 
 			var result resultEnvelope
@@ -213,4 +232,12 @@ func parseProgramResult(result *resultEnvelope) (*Result, error) {
 		return nil, fmt.Errorf("integration stdout is not valid JSON result: %w", err)
 	}
 	return &programResult, nil
+}
+
+func normalizedRuntime(runtime string) string {
+	normalized, err := contract.NormalizeRuntime(runtime)
+	if err != nil {
+		return runtime
+	}
+	return normalized
 }

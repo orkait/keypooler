@@ -144,7 +144,7 @@ func (w *Worker) processItem(ctx context.Context, item *queue.Item) {
 		inputJSON = *exec.Input
 	}
 
-	result, err := w.executor.Execute(ctx, version, fn, decryptedKey, inputJSON)
+	result, err := w.executor.ExecuteWithID(ctx, exec.ID, version, fn, decryptedKey, inputJSON)
 	if err != nil {
 		log.Warn().Err(err).Msg("script execution failed")
 		w.handleFailure(ctx, item, exec, fn, err.Error())

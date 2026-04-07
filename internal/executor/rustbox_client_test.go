@@ -32,6 +32,9 @@ func TestRustboxClientExecuteSuccess(t *testing.T) {
 		if auth := r.Header.Get("X-API-Key"); auth != "rb_local_test" {
 			t.Fatalf("unexpected X-API-Key: %s", auth)
 		}
+		if gotKey := r.Header.Get("Idempotency-Key"); gotKey != "exec-1" {
+			t.Fatalf("unexpected Idempotency-Key: %s", gotKey)
+		}
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
@@ -63,7 +66,7 @@ func TestRustboxClientExecuteSuccess(t *testing.T) {
 	}
 	fn := &contract.Function{Timeout: "15s"}
 
-	result, err := client.Execute(context.Background(), version, fn, "selected-key", `{"prompt":"hi"}`)
+	result, err := client.ExecuteWithID(context.Background(), "exec-1", version, fn, "selected-key", `{"prompt":"hi"}`)
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -86,5 +89,100 @@ func TestRustboxClientExecuteSuccess(t *testing.T) {
 	}
 	if stdinEnvelope["integration"] != "demo-service" {
 		t.Fatalf("expected integration in stdin envelope")
+	}
+}
+
+func TestRustboxClientExecuteAcceptedPollsToCompletion(t *testing.T) {
+	t.Parallel()
+
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/submit":
+			if r.Header.Get("Idempotency-Key") != "exec-2" {
+				t.Fatalf("missing idempotency key")
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":         "job-2",
+				"job_status": "pending",
+			})
+		case r.URL.Path == "/api/result/job-2":
+			polls++
+			w.Header().Set("Content-Type", "application/json")
+			if polls == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id":         "job-2",
+					"job_status": "running",
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":            "job-2",
+				"job_status":    "completed",
+				"verdict":       "AC",
+				"stdout":        `{"success":true,"data":{"done":true}}`,
+				"stderr":        "",
+				"error_message": nil,
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewRustboxClient(server.URL, "rb_local_test", 5*time.Second)
+	version := &db.IntegrationVersion{
+		IntegrationName: "demo-service",
+		FunctionName:    "generate",
+		Version:         1,
+		Runtime:         "python",
+		Code:            `print("hello")`,
+	}
+
+	result, err := client.ExecuteWithID(context.Background(), "exec-2", version, &contract.Function{Timeout: "15s"}, "selected-key", `{}`)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	if polls < 2 {
+		t.Fatalf("expected polling, got %d polls", polls)
+	}
+}
+
+func TestRustboxClientPollResultHandlesHTTPErrors(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/submit":
+			w.WriteHeader(http.StatusRequestTimeout)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "job-3"})
+		case "/api/result/job-3":
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid api key"})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewRustboxClient(server.URL, "rb_local_test", 5*time.Second)
+	version := &db.IntegrationVersion{
+		IntegrationName: "demo-service",
+		FunctionName:    "generate",
+		Version:         1,
+		Runtime:         "python",
+		Code:            `print("hello")`,
+	}
+
+	_, err := client.ExecuteWithID(context.Background(), "exec-3", version, &contract.Function{Timeout: "15s"}, "selected-key", `{}`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); got == "" || got == "context deadline exceeded" {
+		t.Fatalf("expected direct http error, got %q", got)
 	}
 }

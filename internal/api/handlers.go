@@ -174,12 +174,18 @@ func (s *Server) CreateIntegrationVersion(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "integration, function, runtime, feature, contract, and code are required")
 		return
 	}
-	if err := contract.ValidateRuntime(body.Runtime); err != nil {
+	runtimeName, err := contract.NormalizeRuntime(body.Runtime)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := contract.ParseFunction(body.Contract); err != nil {
+	fn, err := contract.ParseFunction(body.Contract)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid contract: "+err.Error())
+		return
+	}
+	if fn.Feature != "" && fn.Feature != body.Feature {
+		writeError(w, http.StatusBadRequest, "contract feature must match top-level feature")
 		return
 	}
 	if body.CreatedBy == "" {
@@ -192,7 +198,7 @@ func (s *Server) CreateIntegrationVersion(w http.ResponseWriter, r *http.Request
 	version, err := s.DB.CreateIntegrationVersion(ctx, &db.IntegrationVersion{
 		IntegrationName: body.Integration,
 		FunctionName:    body.Function,
-		Runtime:         body.Runtime,
+		Runtime:         runtimeName,
 		Feature:         body.Feature,
 		ContractJSON:    string(body.Contract),
 		Code:            body.Code,

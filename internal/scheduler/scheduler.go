@@ -20,6 +20,7 @@ import (
 type ScheduleEntry struct {
 	ScriptName   string
 	FunctionName string
+	VersionID    string
 	Feature      string
 	CronExpr     string
 	Input        string // JSON
@@ -74,6 +75,7 @@ func (s *Scheduler) LoadFromDatabase(ctx context.Context) error {
 		s.entries = append(s.entries, &ScheduleEntry{
 			ScriptName:   version.IntegrationName,
 			FunctionName: version.FunctionName,
+			VersionID:    version.ID,
 			Feature:      version.Feature,
 			CronExpr:     fn.Scheduling.Cron,
 			Input:        inputJSON,
@@ -140,6 +142,7 @@ func (s *Scheduler) tick() {
 			ID:           execID,
 			Script:       entry.ScriptName,
 			FunctionName: entry.FunctionName,
+			VersionID:    &entry.VersionID,
 			Status:       db.StatusPending,
 			TriggerType:  db.TriggerSchedule,
 			Input:        &input,
@@ -162,7 +165,9 @@ func (s *Scheduler) tick() {
 			ExecutionID: execID,
 			Feature:     entry.Feature,
 		}); err != nil {
-			_ = s.dbAdap.UpdateExecutionResult(ctx, execID, db.StatusFailed, "", "failed to enqueue scheduled execution", time.Now().UTC())
+			failCtx, failCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = s.dbAdap.UpdateExecutionResult(failCtx, execID, db.StatusFailed, "", "failed to enqueue scheduled execution", time.Now().UTC())
+			failCancel()
 			s.logger.Error().Err(err).
 				Str("execution_id", execID).
 				Msg("failed to enqueue scheduled execution")

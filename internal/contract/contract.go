@@ -41,11 +41,20 @@ type Schedule struct {
 
 var validRuntimes = map[string]bool{
 	"python":     true,
-	"node":       true,
-	"bun":        true,
-	"deno":       true,
+	"py":         true,
+	"c":          true,
+	"cpp":        true,
+	"c++":        true,
+	"cxx":        true,
+	"cc":         true,
+	"java":       true,
+	"javascript": true,
+	"js":         true,
 	"typescript": true,
+	"ts":         true,
 	"go":         true,
+	"rust":       true,
+	"rs":         true,
 }
 
 // TimeoutDuration parses the timeout string (e.g., "60s") into a time.Duration.
@@ -138,10 +147,32 @@ func (c *Contract) RuntimeArgs() []string {
 
 // ValidateRuntime checks if a runtime is supported.
 func ValidateRuntime(runtime string) error {
-	if !validRuntimes[runtime] {
-		return fmt.Errorf("invalid runtime %q, must be one of: python, node, bun, deno, typescript, go", runtime)
+	_, err := NormalizeRuntime(runtime)
+	return err
+}
+
+// NormalizeRuntime maps accepted aliases onto the canonical rustbox language names.
+func NormalizeRuntime(runtime string) (string, error) {
+	switch runtime {
+	case "python", "py":
+		return "python", nil
+	case "c":
+		return "c", nil
+	case "cpp", "c++", "cxx", "cc":
+		return "cpp", nil
+	case "java":
+		return "java", nil
+	case "javascript", "js":
+		return "javascript", nil
+	case "typescript", "ts":
+		return "typescript", nil
+	case "go":
+		return "go", nil
+	case "rust", "rs":
+		return "rust", nil
+	default:
+		return "", fmt.Errorf("invalid runtime %q, must be one of: python, py, c, cpp, c++, cxx, cc, java, javascript, js, typescript, ts, go, rust, rs", runtime)
 	}
-	return nil
 }
 
 // Validate normalizes defaults and checks required fields.
