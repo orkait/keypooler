@@ -35,6 +35,14 @@ type DBAdapter interface {
 	UpdateExecutionResult(ctx context.Context, id, status, output, errMsg string, completedAt time.Time) error
 	GetExecutionsByStatus(ctx context.Context, status string, limit int) ([]*Execution, error)
 
+	// Integrations
+	CreateIntegrationVersion(ctx context.Context, version *IntegrationVersion) (*IntegrationVersion, error)
+	GetIntegrationVersion(ctx context.Context, id string) (*IntegrationVersion, error)
+	GetActiveIntegrationVersion(ctx context.Context, integrationName, functionName string) (*IntegrationVersion, error)
+	ListIntegrationVersions(ctx context.Context, integrationName, functionName string) ([]*IntegrationVersion, error)
+	ListActiveIntegrationVersions(ctx context.Context) ([]*IntegrationVersion, error)
+	ActivateIntegrationVersion(ctx context.Context, id string) error
+
 	// Dead Letter
 	CreateDeadLetter(ctx context.Context, dl *DeadLetter) error
 	GetDeadLetters(ctx context.Context, limit int) ([]*DeadLetter, error)
@@ -51,8 +59,8 @@ type Tier struct {
 
 // TierFeature represents a feature rate limit within a tier.
 type TierFeature struct {
-	TierID       string
-	Feature      string
+	TierID        string
+	Feature       string
 	RatePerMinute int
 }
 
@@ -71,6 +79,7 @@ type Execution struct {
 	ID           string
 	Script       string
 	FunctionName string
+	VersionID    *string
 	KeyID        *string
 	Status       string
 	TriggerType  string
@@ -89,10 +98,28 @@ type DeadLetter struct {
 	ExecutionID  string
 	Script       string
 	FunctionName string
+	VersionID    *string
 	Input        *string
 	Error        *string
 	Attempts     int
 	FailedAt     time.Time
+}
+
+// IntegrationVersion represents a single immutable version of an integration function.
+type IntegrationVersion struct {
+	ID              string
+	IntegrationName string
+	FunctionName    string
+	Version         int
+	Runtime         string
+	Feature         string
+	ContractJSON    string
+	Code            string
+	Status          string
+	Checksum        string
+	CreatedBy       string
+	CreatedAt       time.Time
+	ActivatedAt     *time.Time
 }
 
 // Execution status constants.
@@ -108,4 +135,11 @@ const (
 const (
 	TriggerAPI      = "api"
 	TriggerSchedule = "schedule"
+)
+
+// Integration version status constants.
+const (
+	IntegrationVersionStatusDraft    = "draft"
+	IntegrationVersionStatusActive   = "active"
+	IntegrationVersionStatusDisabled = "disabled"
 )

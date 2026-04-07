@@ -18,8 +18,9 @@ func NewRouter(srv *Server) http.Handler {
 	mux.Handle("/admin/tiers", admin(http.HandlerFunc(srv.routeTiers)))
 	mux.Handle("/admin/keys", admin(http.HandlerFunc(srv.routeKeys)))
 	mux.Handle("/admin/keys/", admin(http.HandlerFunc(srv.DeleteKey)))
+	mux.Handle("/admin/integrations", admin(http.HandlerFunc(srv.routeIntegrations)))
+	mux.Handle("/admin/integrations/versions/", admin(http.HandlerFunc(srv.ActivateIntegrationVersion)))
 	mux.Handle("/admin/health", admin(http.HandlerFunc(srv.Health)))
-	mux.Handle("/admin/scripts/scan", admin(http.HandlerFunc(srv.ScanScripts)))
 	mux.Handle("/admin/dead-letter", admin(http.HandlerFunc(srv.GetDeadLetters)))
 	mux.Handle("/admin/dead-letter/", admin(http.HandlerFunc(srv.RetryDeadLetter)))
 
@@ -43,6 +44,17 @@ func (s *Server) routeKeys(w http.ResponseWriter, r *http.Request) {
 		s.ListKeys(w, r)
 	case http.MethodPost:
 		s.AddKey(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) routeIntegrations(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.ListIntegrations(w, r)
+	case http.MethodPost:
+		s.CreateIntegrationVersion(w, r)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}

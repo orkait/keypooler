@@ -45,44 +45,50 @@ func New(q *queue.Queue, dbAdap db.DBAdapter, logger zerolog.Logger) *Scheduler 
 	}
 }
 
-// LoadFromContracts builds schedule entries from parsed contracts.
-func (s *Scheduler) LoadFromContracts(contracts map[string]*contract.Contract) {
+// LoadFromDatabase builds schedule entries from active integration versions in the database.
+func (s *Scheduler) LoadFromDatabase(ctx context.Context) error {
+	versions, err := s.dbAdap.ListActiveIntegrationVersions(ctx)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.entries = nil
 
-	for scriptName, c := range contracts {
-		for fnName, fn := range c.Functions {
-			if !fn.Scheduling.Enabled {
-				continue
-			}
-
-			inputJSON := "{}"
-			if fn.Scheduling.Input != nil {
-				b, err := json.Marshal(fn.Scheduling.Input)
-				if err == nil {
-					inputJSON = string(b)
-				}
-			}
-
-			s.entries = append(s.entries, &ScheduleEntry{
-				ScriptName:   scriptName,
-				FunctionName: fnName,
-				Feature:      fn.Feature,
-				CronExpr:     fn.Scheduling.Cron,
-				Input:        inputJSON,
-				NextRunAt:    nextCronTime(fn.Scheduling.Cron, time.Now()),
-				IsActive:     true,
-			})
-
-			s.logger.Info().
-				Str("script", scriptName).
-				Str("function", fnName).
-				Str("cron", fn.Scheduling.Cron).
-				Msg("scheduled function registered")
+	for _, version := range versions {
+		fn, err := contract.ParseFunction([]byte(version.ContractJSON))
+		if err != nil || !fn.Scheduling.Enabled {
+			continue
 		}
+
+		inputJSON := "{}"
+		if fn.Scheduling.Input != nil {
+			b, err := json.Marshal(fn.Scheduling.Input)
+			if err == nil {
+				inputJSON = string(b)
+			}
+		}
+
+		s.entries = append(s.entries, &ScheduleEntry{
+			ScriptName:   version.IntegrationName,
+			FunctionName: version.FunctionName,
+			Feature:      version.Feature,
+			CronExpr:     fn.Scheduling.Cron,
+			Input:        inputJSON,
+			NextRunAt:    nextCronTime(fn.Scheduling.Cron, time.Now()),
+			IsActive:     true,
+		})
+
+		s.logger.Info().
+			Str("integration", version.IntegrationName).
+			Str("function", version.FunctionName).
+			Str("cron", fn.Scheduling.Cron).
+			Msg("scheduled integration version registered")
 	}
+
+	return nil
 }
 
 // Start begins the scheduler tick loop.
@@ -156,6 +162,7 @@ func (s *Scheduler) tick() {
 			ExecutionID: execID,
 			Feature:     entry.Feature,
 		}); err != nil {
+			_ = s.dbAdap.UpdateExecutionResult(ctx, execID, db.StatusFailed, "", "failed to enqueue scheduled execution", time.Now().UTC())
 			s.logger.Error().Err(err).
 				Str("execution_id", execID).
 				Msg("failed to enqueue scheduled execution")

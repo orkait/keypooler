@@ -1,43 +1,51 @@
 package contract
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
-// Contract represents a parsed contract.yaml file.
+// Contract represents a JSON contract manifest for compatibility with import flows.
 type Contract struct {
-	Name      string               `yaml:"name"`
-	Runtime   string               `yaml:"runtime"`
-	Functions map[string]*Function `yaml:"functions"`
-	Path      string               `yaml:"-"` // absolute path to script folder, set after parsing
+	Name      string               `json:"name"`
+	Runtime   string               `json:"runtime"`
+	Functions map[string]*Function `json:"functions"`
+	Path      string               `json:"-"` // absolute path to script folder, set after parsing
 }
 
-// Function represents a single callable function in a contract.
+// Function represents the execution policy for a single callable function.
 type Function struct {
-	Feature    string            `yaml:"feature"`
-	Timeout    string            `yaml:"timeout"`
-	Retry      RetryConfig       `yaml:"retry"`
-	Scheduling Schedule          `yaml:"scheduling"`
-	Input      map[string]string `yaml:"input"`
-	Output     map[string]string `yaml:"output"`
+	Feature    string            `json:"feature"`
+	Timeout    string            `json:"timeout"`
+	Retry      RetryConfig       `json:"retry"`
+	Scheduling Schedule          `json:"scheduling"`
+	Input      map[string]string `json:"input"`
+	Output     map[string]string `json:"output"`
 }
 
 // RetryConfig defines retry behavior for a function.
 type RetryConfig struct {
-	Enabled     bool `yaml:"enabled"`
-	MaxAttempts int  `yaml:"max_attempts"`
+	Enabled     bool `json:"enabled"`
+	MaxAttempts int  `json:"max_attempts"`
 }
 
 // Schedule defines cron scheduling for a function.
 type Schedule struct {
-	Enabled bool           `yaml:"enabled"`
-	Cron    string         `yaml:"cron"`
-	Input   map[string]any `yaml:"input"`
+	Enabled bool           `json:"enabled"`
+	Cron    string         `json:"cron"`
+	Input   map[string]any `json:"input"`
+}
+
+var validRuntimes = map[string]bool{
+	"python":     true,
+	"node":       true,
+	"bun":        true,
+	"deno":       true,
+	"typescript": true,
+	"go":         true,
 }
 
 // TimeoutDuration parses the timeout string (e.g., "60s") into a time.Duration.
@@ -49,17 +57,29 @@ func (f *Function) TimeoutDuration() time.Duration {
 	return d
 }
 
-// LoadFromDir reads and parses contract.yaml from the given directory.
+// ParseFunction decodes a JSON function contract and normalizes defaults.
+func ParseFunction(data []byte) (*Function, error) {
+	var fn Function
+	if err := json.Unmarshal(data, &fn); err != nil {
+		return nil, fmt.Errorf("failed to parse contract JSON: %w", err)
+	}
+	if err := fn.Validate(); err != nil {
+		return nil, err
+	}
+	return &fn, nil
+}
+
+// LoadFromDir reads and parses contract.json from the given directory.
 func LoadFromDir(dir string) (*Contract, error) {
-	path := filepath.Join(dir, "contract.yaml")
+	path := filepath.Join(dir, "contract.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read contract.yaml: %w", err)
+		return nil, fmt.Errorf("failed to read contract.json: %w", err)
 	}
 
 	var c Contract
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("failed to parse contract.yaml: %w", err)
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("failed to parse contract.json: %w", err)
 	}
 
 	if err := c.validate(); err != nil {
@@ -116,35 +136,54 @@ func (c *Contract) RuntimeArgs() []string {
 	}
 }
 
+// ValidateRuntime checks if a runtime is supported.
+func ValidateRuntime(runtime string) error {
+	if !validRuntimes[runtime] {
+		return fmt.Errorf("invalid runtime %q, must be one of: python, node, bun, deno, typescript, go", runtime)
+	}
+	return nil
+}
+
+// Validate normalizes defaults and checks required fields.
+func (f *Function) Validate() error {
+	if f.Timeout == "" {
+		f.Timeout = "60s"
+	}
+	if _, err := time.ParseDuration(f.Timeout); err != nil {
+		return fmt.Errorf("invalid timeout %q", f.Timeout)
+	}
+	if f.Retry.Enabled && f.Retry.MaxAttempts < 1 {
+		f.Retry.MaxAttempts = 3
+	}
+	if f.Scheduling.Enabled && f.Scheduling.Cron == "" {
+		return fmt.Errorf("cron expression required when scheduling is enabled")
+	}
+	return nil
+}
+
+func (f *Function) validateWithFeatureRequired() error {
+	if f.Feature == "" {
+		return fmt.Errorf("feature is required")
+	}
+	return f.Validate()
+}
+
 func (c *Contract) validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if c.Runtime == "" {
-		return fmt.Errorf("runtime is required")
-	}
-	validRuntimes := map[string]bool{"python": true, "node": true, "bun": true, "deno": true, "typescript": true, "go": true}
-	if !validRuntimes[c.Runtime] {
-		return fmt.Errorf("invalid runtime %q, must be one of: python, node, bun, deno, typescript, go", c.Runtime)
+	if err := ValidateRuntime(c.Runtime); err != nil {
+		return err
 	}
 	if len(c.Functions) == 0 {
 		return fmt.Errorf("at least one function is required")
 	}
 	for name, fn := range c.Functions {
-		if fn.Feature == "" {
-			return fmt.Errorf("function %q: feature is required", name)
+		if fn == nil {
+			return fmt.Errorf("function %q is required", name)
 		}
-		if fn.Timeout == "" {
-			fn.Timeout = "60s"
-		}
-		if _, err := time.ParseDuration(fn.Timeout); err != nil {
-			return fmt.Errorf("function %q: invalid timeout %q", name, fn.Timeout)
-		}
-		if fn.Retry.Enabled && fn.Retry.MaxAttempts < 1 {
-			fn.Retry.MaxAttempts = 3 // default
-		}
-		if fn.Scheduling.Enabled && fn.Scheduling.Cron == "" {
-			return fmt.Errorf("function %q: cron expression required when scheduling is enabled", name)
+		if err := fn.validateWithFeatureRequired(); err != nil {
+			return fmt.Errorf("function %q: %w", name, err)
 		}
 	}
 	return nil

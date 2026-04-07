@@ -9,9 +9,9 @@ import (
 
 func (a *SQLiteAdapter) CreateExecution(ctx context.Context, exec *Execution) error {
 	_, err := a.db.ExecContext(ctx,
-		`INSERT INTO executions (id, script, function_name, status, trigger_type, callback_url, input, attempts)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		exec.ID, exec.Script, exec.FunctionName, exec.Status, exec.TriggerType,
+		`INSERT INTO executions (id, script, function_name, version_id, status, trigger_type, callback_url, input, attempts)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		exec.ID, exec.Script, exec.FunctionName, exec.VersionID, exec.Status, exec.TriggerType,
 		exec.CallbackURL, exec.Input, exec.Attempts,
 	)
 	return err
@@ -19,14 +19,14 @@ func (a *SQLiteAdapter) CreateExecution(ctx context.Context, exec *Execution) er
 
 func (a *SQLiteAdapter) GetExecution(ctx context.Context, id string) (*Execution, error) {
 	var e Execution
-	var keyID, callbackURL, input, output, errStr sql.NullString
+	var versionID, keyID, callbackURL, input, output, errStr sql.NullString
 	var completedAt sql.NullTime
 
 	err := a.db.QueryRowContext(ctx,
-		`SELECT id, script, function_name, key_id, status, trigger_type, callback_url,
+		`SELECT id, script, function_name, version_id, key_id, status, trigger_type, callback_url,
 		        input, output, error, attempts, created_at, completed_at
 		 FROM executions WHERE id = ?`, id,
-	).Scan(&e.ID, &e.Script, &e.FunctionName, &keyID, &e.Status, &e.TriggerType,
+	).Scan(&e.ID, &e.Script, &e.FunctionName, &versionID, &keyID, &e.Status, &e.TriggerType,
 		&callbackURL, &input, &output, &errStr, &e.Attempts, &e.CreatedAt, &completedAt)
 
 	if err == sql.ErrNoRows {
@@ -36,6 +36,9 @@ func (a *SQLiteAdapter) GetExecution(ctx context.Context, id string) (*Execution
 		return nil, err
 	}
 
+	if versionID.Valid {
+		e.VersionID = &versionID.String
+	}
 	if keyID.Valid {
 		e.KeyID = &keyID.String
 	}
@@ -101,7 +104,7 @@ func (a *SQLiteAdapter) UpdateExecutionResult(ctx context.Context, id, status, o
 
 func (a *SQLiteAdapter) GetExecutionsByStatus(ctx context.Context, status string, limit int) ([]*Execution, error) {
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT id, script, function_name, key_id, status, trigger_type, callback_url,
+		`SELECT id, script, function_name, version_id, key_id, status, trigger_type, callback_url,
 		        input, output, error, attempts, created_at, completed_at
 		 FROM executions WHERE status = ? ORDER BY created_at ASC LIMIT ?`,
 		status, limit,
@@ -124,15 +127,18 @@ func (a *SQLiteAdapter) GetExecutionsByStatus(ctx context.Context, status string
 
 func scanExecution(rows *sql.Rows) (*Execution, error) {
 	var e Execution
-	var keyID, callbackURL, input, output, errStr sql.NullString
+	var versionID, keyID, callbackURL, input, output, errStr sql.NullString
 	var completedAt sql.NullTime
 
-	err := rows.Scan(&e.ID, &e.Script, &e.FunctionName, &keyID, &e.Status, &e.TriggerType,
+	err := rows.Scan(&e.ID, &e.Script, &e.FunctionName, &versionID, &keyID, &e.Status, &e.TriggerType,
 		&callbackURL, &input, &output, &errStr, &e.Attempts, &e.CreatedAt, &completedAt)
 	if err != nil {
 		return nil, err
 	}
 
+	if versionID.Valid {
+		e.VersionID = &versionID.String
+	}
 	if keyID.Valid {
 		e.KeyID = &keyID.String
 	}
@@ -159,16 +165,16 @@ func scanExecution(rows *sql.Rows) (*Execution, error) {
 
 func (a *SQLiteAdapter) CreateDeadLetter(ctx context.Context, dl *DeadLetter) error {
 	_, err := a.db.ExecContext(ctx,
-		`INSERT INTO dead_letter (id, execution_id, script, function_name, input, error, attempts)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		dl.ID, dl.ExecutionID, dl.Script, dl.FunctionName, dl.Input, dl.Error, dl.Attempts,
+		`INSERT INTO dead_letter (id, execution_id, script, function_name, version_id, input, error, attempts)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		dl.ID, dl.ExecutionID, dl.Script, dl.FunctionName, dl.VersionID, dl.Input, dl.Error, dl.Attempts,
 	)
 	return err
 }
 
 func (a *SQLiteAdapter) GetDeadLetters(ctx context.Context, limit int) ([]*DeadLetter, error) {
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT id, execution_id, script, function_name, input, error, attempts, failed_at
+		`SELECT id, execution_id, script, function_name, version_id, input, error, attempts, failed_at
 		 FROM dead_letter ORDER BY failed_at DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -179,10 +185,13 @@ func (a *SQLiteAdapter) GetDeadLetters(ctx context.Context, limit int) ([]*DeadL
 	var dls []*DeadLetter
 	for rows.Next() {
 		var dl DeadLetter
-		var input, errStr sql.NullString
-		if err := rows.Scan(&dl.ID, &dl.ExecutionID, &dl.Script, &dl.FunctionName,
+		var versionID, input, errStr sql.NullString
+		if err := rows.Scan(&dl.ID, &dl.ExecutionID, &dl.Script, &dl.FunctionName, &versionID,
 			&input, &errStr, &dl.Attempts, &dl.FailedAt); err != nil {
 			return nil, err
+		}
+		if versionID.Valid {
+			dl.VersionID = &versionID.String
 		}
 		if input.Valid {
 			dl.Input = &input.String
@@ -197,17 +206,20 @@ func (a *SQLiteAdapter) GetDeadLetters(ctx context.Context, limit int) ([]*DeadL
 
 func (a *SQLiteAdapter) GetDeadLetter(ctx context.Context, id string) (*DeadLetter, error) {
 	var dl DeadLetter
-	var input, errStr sql.NullString
+	var versionID, input, errStr sql.NullString
 	err := a.db.QueryRowContext(ctx,
-		`SELECT id, execution_id, script, function_name, input, error, attempts, failed_at
+		`SELECT id, execution_id, script, function_name, version_id, input, error, attempts, failed_at
 		 FROM dead_letter WHERE id = ?`, id,
-	).Scan(&dl.ID, &dl.ExecutionID, &dl.Script, &dl.FunctionName,
+	).Scan(&dl.ID, &dl.ExecutionID, &dl.Script, &dl.FunctionName, &versionID,
 		&input, &errStr, &dl.Attempts, &dl.FailedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if versionID.Valid {
+		dl.VersionID = &versionID.String
 	}
 	if input.Valid {
 		dl.Input = &input.String

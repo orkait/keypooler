@@ -34,8 +34,9 @@ type Config struct {
 	ScriptsPath string
 
 	// Runner
-	RunnerMode  string // "auto", "local", "docker"
-	RunnerImage string
+	RustboxURL        string
+	RustboxAPIKey     string
+	RustboxTimeoutSec int
 
 	// Logging
 	LogLevel    string
@@ -66,8 +67,9 @@ func Load() (*Config, error) {
 
 		ScriptsPath: getEnv("SCRIPTS_PATH", "./scripts"),
 
-		RunnerMode:  getEnv("RUNNER_MODE", "docker"),
-		RunnerImage: getEnv("RUNNER_IMAGE", "keypooler-runtime"),
+		RustboxURL:        getEnv("RUSTBOX_URL", "http://127.0.0.1:4096"),
+		RustboxAPIKey:     getEnv("RUSTBOX_API_KEY", ""),
+		RustboxTimeoutSec: getEnvAsInt("RUSTBOX_TIMEOUT_SECONDS", 70),
 
 		LogLevel:    getEnv("LOG_LEVEL", "info"),
 		LogFormat:   getEnv("LOG_FORMAT", "json"),
@@ -101,6 +103,15 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := validatePositiveInt("QUEUE_MAX_SIZE", c.QueueMaxSize); err != nil {
+		return err
+	}
+	if c.RustboxURL == "" {
+		return fmt.Errorf("RUSTBOX_URL is required")
+	}
+	if c.RustboxAPIKey == "" {
+		return fmt.Errorf("RUSTBOX_API_KEY is required")
+	}
+	if err := validatePositiveInt("RUSTBOX_TIMEOUT_SECONDS", c.RustboxTimeoutSec); err != nil {
 		return err
 	}
 	return nil

@@ -1,12 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
+	"time"
 
 	"key-pool-system/internal/config"
 	"key-pool-system/internal/contract"
@@ -29,23 +28,6 @@ type Server struct {
 	Cfg       *config.Config
 	Scheduler *scheduler.Scheduler
 	Logger    zerolog.Logger
-
-	mu        sync.RWMutex
-	contracts map[string]*contract.Contract
-}
-
-// SetContracts replaces the contracts map (thread-safe).
-func (s *Server) SetContracts(c map[string]*contract.Contract) {
-	s.mu.Lock()
-	s.contracts = c
-	s.mu.Unlock()
-}
-
-// GetContracts returns the current contracts map (thread-safe).
-func (s *Server) GetContracts() map[string]*contract.Contract {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.contracts
 }
 
 // --- Public endpoints ---
@@ -62,10 +44,11 @@ func (s *Server) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Script      string         `json:"script"`
-		Function    string         `json:"function"`
-		Input       map[string]any `json:"input"`
-		CallbackURL string         `json:"callback_url"`
+		Script      string          `json:"script"`
+		Integration string          `json:"integration"`
+		Function    string          `json:"function"`
+		Input       json.RawMessage `json:"input"`
+		CallbackURL string          `json:"callback_url"`
 	}
 
 	if err := decodeJSON(r, &body); err != nil {
@@ -73,36 +56,41 @@ func (s *Server) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.Script == "" || body.Function == "" {
-		writeError(w, http.StatusBadRequest, "script and function are required")
+	integrationName := body.Integration
+	if integrationName == "" {
+		integrationName = body.Script
+	}
+	if integrationName == "" || body.Function == "" {
+		writeError(w, http.StatusBadRequest, "integration/script and function are required")
 		return
 	}
 
-	// Validate script + function exist
-	c, ok := s.GetContracts()[body.Script]
-	if !ok {
-		writeError(w, http.StatusNotFound, "script not found: "+body.Script)
+	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
+	defer cancel()
+
+	version, err := s.DB.GetActiveIntegrationVersion(ctx, integrationName, body.Function)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
 		return
 	}
-	fn, ok := c.Functions[body.Function]
-	if !ok {
-		writeError(w, http.StatusNotFound, "function not found: "+body.Function)
+	if version == nil {
+		writeError(w, http.StatusNotFound, "active integration version not found")
 		return
 	}
 
 	// Serialize input
 	inputJSON := "{}"
-	if body.Input != nil {
-		b, _ := json.Marshal(body.Input)
-		inputJSON = string(b)
+	if len(body.Input) > 0 {
+		inputJSON = string(body.Input)
 	}
 
 	// Create execution record
 	execID := uuid.New().String()
 	exec := &db.Execution{
 		ID:           execID,
-		Script:       body.Script,
+		Script:       integrationName,
 		FunctionName: body.Function,
+		VersionID:    &version.ID,
 		Status:       db.StatusPending,
 		TriggerType:  db.TriggerAPI,
 		Input:        &inputJSON,
@@ -111,8 +99,6 @@ func (s *Server) Execute(w http.ResponseWriter, r *http.Request) {
 		exec.CallbackURL = &body.CallbackURL
 	}
 
-	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
-	defer cancel()
 	if err := s.DB.CreateExecution(ctx, exec); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create execution")
 		return
@@ -121,8 +107,9 @@ func (s *Server) Execute(w http.ResponseWriter, r *http.Request) {
 	// Enqueue
 	if err := s.Queue.Enqueue(&queue.Item{
 		ExecutionID: execID,
-		Feature:     fn.Feature,
+		Feature:     version.Feature,
 	}); err != nil {
+		_ = s.DB.UpdateExecutionResult(ctx, execID, db.StatusFailed, "", "failed to enqueue execution", utilNowUTC())
 		writeError(w, http.StatusServiceUnavailable, "queue is full")
 		return
 	}
@@ -160,6 +147,131 @@ func (s *Server) GetExecution(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, executionToResponse(exec))
+}
+
+// CreateIntegrationVersion handles POST /admin/integrations
+func (s *Server) CreateIntegrationVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var body struct {
+		Integration string          `json:"integration"`
+		Function    string          `json:"function"`
+		Runtime     string          `json:"runtime"`
+		Feature     string          `json:"feature"`
+		Contract    json.RawMessage `json:"contract"`
+		Code        string          `json:"code"`
+		CreatedBy   string          `json:"created_by"`
+		Activate    bool            `json:"activate"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Integration == "" || body.Function == "" || body.Runtime == "" || body.Feature == "" || len(body.Contract) == 0 || body.Code == "" {
+		writeError(w, http.StatusBadRequest, "integration, function, runtime, feature, contract, and code are required")
+		return
+	}
+	if err := contract.ValidateRuntime(body.Runtime); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := contract.ParseFunction(body.Contract); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid contract: "+err.Error())
+		return
+	}
+	if body.CreatedBy == "" {
+		body.CreatedBy = "admin"
+	}
+
+	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutLong)
+	defer cancel()
+
+	version, err := s.DB.CreateIntegrationVersion(ctx, &db.IntegrationVersion{
+		IntegrationName: body.Integration,
+		FunctionName:    body.Function,
+		Runtime:         body.Runtime,
+		Feature:         body.Feature,
+		ContractJSON:    string(body.Contract),
+		Code:            body.Code,
+		CreatedBy:       body.CreatedBy,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create integration version")
+		return
+	}
+	if body.Activate {
+		if err := s.DB.ActivateIntegrationVersion(ctx, version.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to activate integration version")
+			return
+		}
+		version.Status = db.IntegrationVersionStatusActive
+	}
+	_ = s.reloadSchedules(ctx)
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":          version.ID,
+		"integration": version.IntegrationName,
+		"function":    version.FunctionName,
+		"version":     version.Version,
+		"status":      version.Status,
+	})
+}
+
+// ListIntegrations handles GET /admin/integrations
+func (s *Server) ListIntegrations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	integrationName := r.URL.Query().Get("integration")
+	functionName := r.URL.Query().Get("function")
+
+	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutShort)
+	defer cancel()
+
+	if integrationName != "" && functionName != "" {
+		versions, err := s.DB.ListIntegrationVersions(ctx, integrationName, functionName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "database error")
+			return
+		}
+		writeJSON(w, http.StatusOK, versions)
+		return
+	}
+
+	versions, err := s.DB.ListActiveIntegrationVersions(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	writeJSON(w, http.StatusOK, versions)
+}
+
+// ActivateIntegrationVersion handles POST /admin/integrations/versions/{id}/activate
+func (s *Server) ActivateIntegrationVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/admin/integrations/versions/")
+	id := strings.TrimSuffix(path, "/activate")
+	if id == "" || id == path {
+		writeError(w, http.StatusBadRequest, "integration version id required")
+		return
+	}
+
+	ctx, cancel := util.DBContext(r.Context(), util.DBTimeoutLong)
+	defer cancel()
+	if err := s.DB.ActivateIntegrationVersion(ctx, id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = s.reloadSchedules(ctx)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "activated"})
 }
 
 // --- Admin endpoints ---
@@ -212,8 +324,8 @@ func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
 	features := make([]*db.TierFeature, 0, len(body.Features))
 	for feature, rate := range body.Features {
 		features = append(features, &db.TierFeature{
-			TierID:       tier.ID,
-			Feature:      feature,
+			TierID:        tier.ID,
+			Feature:       feature,
 			RatePerMinute: rate,
 		})
 	}
@@ -396,34 +508,6 @@ func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ScanScripts handles POST /admin/scripts/scan
-func (s *Server) ScanScripts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	contracts, err := ScanScriptsDir(s.Cfg.ScriptsPath, s.Logger)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "scan failed: "+err.Error())
-		return
-	}
-
-	// Update in-memory contracts
-	s.SetContracts(contracts)
-	s.Scheduler.LoadFromContracts(contracts)
-
-	names := make([]string, 0, len(contracts))
-	for name := range contracts {
-		names = append(names, name)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"scripts": names,
-		"count":   len(contracts),
-	})
-}
-
 // GetDeadLetters handles GET /admin/dead-letter
 func (s *Server) GetDeadLetters(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -490,15 +574,18 @@ func (s *Server) RetryDeadLetter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up contract to get feature
-	c, ok := s.GetContracts()[dl.Script]
-	if !ok {
-		writeError(w, http.StatusNotFound, "script not found: "+dl.Script)
+	var version *db.IntegrationVersion
+	if dl.VersionID != nil && *dl.VersionID != "" {
+		version, err = s.DB.GetIntegrationVersion(ctx, *dl.VersionID)
+	} else {
+		version, err = s.DB.GetActiveIntegrationVersion(ctx, dl.Script, dl.FunctionName)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
 		return
 	}
-	fn, ok := c.Functions[dl.FunctionName]
-	if !ok {
-		writeError(w, http.StatusNotFound, "function not found: "+dl.FunctionName)
+	if version == nil {
+		writeError(w, http.StatusNotFound, "integration version not found")
 		return
 	}
 
@@ -508,6 +595,7 @@ func (s *Server) RetryDeadLetter(w http.ResponseWriter, r *http.Request) {
 		ID:           execID,
 		Script:       dl.Script,
 		FunctionName: dl.FunctionName,
+		VersionID:    dl.VersionID,
 		Status:       db.StatusPending,
 		TriggerType:  db.TriggerAPI,
 		Input:        dl.Input,
@@ -524,8 +612,9 @@ func (s *Server) RetryDeadLetter(w http.ResponseWriter, r *http.Request) {
 	// Enqueue
 	if err := s.Queue.Enqueue(&queue.Item{
 		ExecutionID: execID,
-		Feature:     fn.Feature,
+		Feature:     version.Feature,
 	}); err != nil {
+		_ = s.DB.UpdateExecutionResult(ctx, execID, db.StatusFailed, "", "failed to enqueue execution", utilNowUTC())
 		writeError(w, http.StatusServiceUnavailable, "queue is full")
 		return
 	}
@@ -538,34 +627,6 @@ func (s *Server) RetryDeadLetter(w http.ResponseWriter, r *http.Request) {
 
 // --- Helpers ---
 
-func ScanScriptsDir(scriptsPath string, logger zerolog.Logger) (map[string]*contract.Contract, error) {
-	contracts := make(map[string]*contract.Contract)
-
-	entries, err := os.ReadDir(scriptsPath)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		dir := filepath.Join(scriptsPath, entry.Name())
-		c, err := contract.LoadFromDir(dir)
-		if err != nil {
-			logger.Warn().Err(err).Str("dir", entry.Name()).Msg("skipping invalid script")
-			continue
-		}
-
-		contracts[c.Name] = c
-		logger.Info().Str("script", c.Name).Str("runtime", c.Runtime).
-			Int("functions", len(c.Functions)).Msg("loaded script contract")
-	}
-
-	return contracts, nil
-}
-
 func executionToResponse(exec *db.Execution) map[string]any {
 	resp := map[string]any{
 		"id":            exec.ID,
@@ -575,6 +636,9 @@ func executionToResponse(exec *db.Execution) map[string]any {
 		"trigger":       exec.TriggerType,
 		"attempts":      exec.Attempts,
 		"created_at":    exec.CreatedAt,
+	}
+	if exec.VersionID != nil {
+		resp["version_id"] = *exec.VersionID
 	}
 	if exec.KeyID != nil {
 		resp["key_id"] = *exec.KeyID
@@ -603,4 +667,15 @@ func extractPathParam(path, prefix string) string {
 		trimmed = trimmed[:idx]
 	}
 	return trimmed
+}
+
+func (s *Server) reloadSchedules(ctx context.Context) error {
+	if s.Scheduler == nil {
+		return nil
+	}
+	return s.Scheduler.LoadFromDatabase(ctx)
+}
+
+func utilNowUTC() time.Time {
+	return time.Now().UTC()
 }

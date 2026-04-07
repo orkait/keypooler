@@ -7,14 +7,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"key-pool-system/internal/api"
 	"key-pool-system/internal/config"
-	"key-pool-system/internal/contract"
 	"key-pool-system/internal/db"
+	"key-pool-system/internal/executor"
 	"key-pool-system/internal/keypool"
 	"key-pool-system/internal/queue"
-	"key-pool-system/internal/runner"
 	"key-pool-system/internal/scheduler"
 	"key-pool-system/internal/util"
 	"key-pool-system/internal/worker"
@@ -47,14 +47,6 @@ func main() {
 	cancel()
 	logger.Info().Msg("migrations completed")
 
-	// Scan scripts
-	contracts, err := api.ScanScriptsDir(cfg.ScriptsPath, logger)
-	if err != nil {
-		logger.Warn().Err(err).Msg("failed to scan scripts directory")
-		contracts = make(map[string]*contract.Contract)
-	}
-	logger.Info().Int("scripts", len(contracts)).Msg("scripts loaded")
-
 	// Key pool
 	poolMgr, err := keypool.NewManager(dbAdapter, logger)
 	if err != nil {
@@ -67,7 +59,12 @@ func main() {
 
 	// Scheduler
 	sched := scheduler.New(q, dbAdapter, logger)
-	sched.LoadFromContracts(contracts)
+	ctx, cancel = util.DBContext(context.Background(), util.DBTimeoutLong)
+	if err := sched.LoadFromDatabase(ctx); err != nil {
+		cancel()
+		logger.Fatal().Err(err).Msg("failed to load scheduled integrations")
+	}
+	cancel()
 
 	// Root context
 	rootCtx, rootCancel := context.WithCancel(context.Background())
@@ -82,34 +79,17 @@ func main() {
 		Scheduler: sched,
 		Logger:    logger,
 	}
-	srv.SetContracts(contracts)
 
-	// Runner
-	r, runnerWarnings := runner.New(cfg.RunnerMode, cfg.RunnerImage)
-	for _, w := range runnerWarnings {
-		logger.Warn().Msg(w)
-	}
-	logger.Info().Str("mode", r.Mode).Str("image", r.Image).Msg("runner configured")
-
-	if r.Mode == "local" {
-		runtimes := runner.CheckLocalRuntimes()
-		missing := false
-		for _, rt := range runtimes {
-			if rt.Available {
-				logger.Info().Str("runtime", rt.Name).Str("version", rt.Version).Msg("runtime found")
-			} else {
-				missing = true
-				logger.Warn().Str("runtime", rt.Name).Str("install", rt.Install).Msg("runtime not found — scripts using this runtime will fail")
-			}
-		}
-		if missing {
-			logger.Warn().Msg("install missing runtimes above, or set RUNNER_MODE=docker and build the runtime image: docker build -f Dockerfile.runtime -t keypooler-runtime .")
-		}
-	}
+	execClient := executor.NewRustboxClient(
+		cfg.RustboxURL,
+		cfg.RustboxAPIKey,
+		time.Duration(cfg.RustboxTimeoutSec)*time.Second,
+	)
+	logger.Info().Str("rustbox_url", cfg.RustboxURL).Msg("rustbox executor configured")
 
 	// Worker pool
 	workerPool := worker.NewPool(
-		cfg.WorkerCount, q, poolMgr, dbAdapter, srv.GetContracts, r, cfg.EncryptionKey, logger,
+		cfg.WorkerCount, q, poolMgr, dbAdapter, execClient, cfg.EncryptionKey, logger,
 	)
 	workerPool.Start(rootCtx, cfg.WorkerWarmupPeriod)
 	logger.Info().Int("workers", cfg.WorkerCount).Msg("worker pool started")

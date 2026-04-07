@@ -9,9 +9,9 @@ import (
 	"key-pool-system/internal/contract"
 	"key-pool-system/internal/crypto"
 	"key-pool-system/internal/db"
+	"key-pool-system/internal/executor"
 	"key-pool-system/internal/keypool"
 	"key-pool-system/internal/queue"
-	"key-pool-system/internal/runner"
 	"key-pool-system/internal/util"
 	"key-pool-system/internal/webhook"
 
@@ -19,19 +19,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// ContractsFunc returns the current contracts map (thread-safe).
-type ContractsFunc func() map[string]*contract.Contract
-
 // Worker processes queue items by executing scripts.
 type Worker struct {
-	id           int
-	queue        *queue.Queue
-	pool         *keypool.Manager
-	dbAdap       db.DBAdapter
-	getContracts ContractsFunc
-	runner       *runner.Runner
-	encKey       string
-	logger       zerolog.Logger
+	id       int
+	queue    *queue.Queue
+	pool     *keypool.Manager
+	dbAdap   db.DBAdapter
+	executor *executor.Client
+	encKey   string
+	logger   zerolog.Logger
 }
 
 // NewWorker creates a worker with all dependencies.
@@ -40,20 +36,18 @@ func NewWorker(
 	q *queue.Queue,
 	pool *keypool.Manager,
 	dbAdap db.DBAdapter,
-	getContracts ContractsFunc,
-	r *runner.Runner,
+	exec *executor.Client,
 	encKey string,
 	logger zerolog.Logger,
 ) *Worker {
 	return &Worker{
-		id:           id,
-		queue:        q,
-		pool:         pool,
-		dbAdap:       dbAdap,
-		getContracts: getContracts,
-		runner:       r,
-		encKey:       encKey,
-		logger:       logger.With().Int("worker_id", id).Logger(),
+		id:       id,
+		queue:    q,
+		pool:     pool,
+		dbAdap:   dbAdap,
+		executor: exec,
+		encKey:   encKey,
+		logger:   logger.With().Int("worker_id", id).Logger(),
 	}
 }
 
@@ -96,18 +90,30 @@ func (w *Worker) processItem(ctx context.Context, item *queue.Item) {
 		return
 	}
 
-	// 2. Look up contract
-	c, ok := w.getContracts()[exec.Script]
-	if !ok {
-		log.Error().Str("script", exec.Script).Msg("contract not found")
-		w.failExecution(ctx, exec, "contract not found for script: "+exec.Script)
+	// 2. Resolve exact integration version
+	var (
+		version *db.IntegrationVersion
+		fn      *contract.Function
+	)
+	if exec.VersionID != nil && *exec.VersionID != "" {
+		version, err = w.dbAdap.GetIntegrationVersion(ctx, *exec.VersionID)
+	} else {
+		version, err = w.dbAdap.GetActiveIntegrationVersion(ctx, exec.Script, exec.FunctionName)
+	}
+	if err != nil {
+		log.Error().Err(err).Msg("failed to resolve integration version")
+		w.failExecution(ctx, exec, "failed to resolve integration version")
 		return
 	}
-
-	fn, ok := c.Functions[exec.FunctionName]
-	if !ok {
-		log.Error().Str("function", exec.FunctionName).Msg("function not found in contract")
-		w.failExecution(ctx, exec, "function not found: "+exec.FunctionName)
+	if version == nil {
+		log.Error().Str("script", exec.Script).Str("function", exec.FunctionName).Msg("integration version not found")
+		w.failExecution(ctx, exec, "integration version not found")
+		return
+	}
+	fn, err = contract.ParseFunction([]byte(version.ContractJSON))
+	if err != nil {
+		log.Error().Err(err).Msg("invalid integration contract")
+		w.failExecution(ctx, exec, "invalid integration contract: "+err.Error())
 		return
 	}
 
@@ -138,7 +144,7 @@ func (w *Worker) processItem(ctx context.Context, item *queue.Item) {
 		inputJSON = *exec.Input
 	}
 
-	result, err := w.runner.Run(ctx, c, exec.FunctionName, decryptedKey, inputJSON)
+	result, err := w.executor.Execute(ctx, version, fn, decryptedKey, inputJSON)
 	if err != nil {
 		log.Warn().Err(err).Msg("script execution failed")
 		w.handleFailure(ctx, item, exec, fn, err.Error())
@@ -153,7 +159,7 @@ func (w *Worker) processItem(ctx context.Context, item *queue.Item) {
 	}
 }
 
-func (w *Worker) handleSuccess(ctx context.Context, exec *db.Execution, result *runner.Result) {
+func (w *Worker) handleSuccess(ctx context.Context, exec *db.Execution, result *executor.Result) {
 	output := string(result.Data)
 
 	dbCtx, cancel := util.DBContext(ctx, util.DBTimeoutShort)
@@ -203,6 +209,7 @@ func (w *Worker) handleFailure(ctx context.Context, item *queue.Item, exec *db.E
 			ExecutionID:  exec.ID,
 			Script:       exec.Script,
 			FunctionName: exec.FunctionName,
+			VersionID:    exec.VersionID,
 			Input:        exec.Input,
 			Error:        &errMsg,
 			Attempts:     attempts,

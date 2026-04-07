@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"key-pool-system/internal/db"
+	"key-pool-system/internal/executor"
 	"key-pool-system/internal/keypool"
 	"key-pool-system/internal/queue"
-	"key-pool-system/internal/runner"
 
 	"github.com/rs/zerolog"
 )
@@ -26,14 +26,13 @@ func NewPool(
 	q *queue.Queue,
 	keyPool *keypool.Manager,
 	dbAdap db.DBAdapter,
-	getContracts ContractsFunc,
-	r *runner.Runner,
+	exec *executor.Client,
 	encKey string,
 	logger zerolog.Logger,
 ) *Pool {
 	workers := make([]*Worker, count)
 	for i := 0; i < count; i++ {
-		workers[i] = NewWorker(i, q, keyPool, dbAdap, getContracts, r, encKey, logger)
+		workers[i] = NewWorker(i, q, keyPool, dbAdap, exec, encKey, logger)
 	}
 	return &Pool{
 		workers: workers,
