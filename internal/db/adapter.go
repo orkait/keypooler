@@ -29,6 +29,11 @@ type DBAdapter interface {
 	GetKeysByTier(ctx context.Context, tierID string) ([]*Key, error)
 	DeleteKey(ctx context.Context, id string) error
 	SetKeyActive(ctx context.Context, id string, active bool) error
+	IncrementUsage(ctx context.Context, keyID string) error
+
+	// Key Secrets
+	GetKeySecrets(ctx context.Context, keyID string) ([]*KeySecret, error)
+	SetKeySecrets(ctx context.Context, keyID string, secrets []*KeySecret) error
 }
 
 // Tier represents a key tier with feature rate limits.
@@ -42,7 +47,8 @@ type Tier struct {
 type TierFeature struct {
 	TierID        string
 	Feature       string
-	RatePerMinute int
+	RateLimit     int
+	WindowSeconds int
 }
 
 // Key represents an API key in the pool.
@@ -52,5 +58,16 @@ type Key struct {
 	KeyEncrypted string
 	TierID       string
 	IsActive     bool
+	ExpiresAt    *time.Time
+	UsageLimit   *int
+	UsageCount   int
+	Metadata     map[string]any
 	CreatedAt    time.Time
+}
+
+// KeySecret is a named encrypted secret bound to a key.
+type KeySecret struct {
+	KeyID          string
+	Name           string
+	ValueEncrypted string
 }

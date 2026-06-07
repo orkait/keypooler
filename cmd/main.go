@@ -50,7 +50,7 @@ func main() {
 	logger.Info().Msg("migrations completed")
 
 	// Key pool
-	poolMgr, err := keypool.NewManager(dbAdapter, logger)
+	poolMgr, err := keypool.NewManager(dbAdapter, cfg.EncryptionKey, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize key pool")
 	}
