@@ -1,5 +1,6 @@
 # Build stage - pure Go, CGO-free (no C toolchain or SQLite headers needed).
-FROM golang:1.22-bookworm AS builder
+# Go 1.25 matches the go.mod directive (modernc.org/sqlite requires >= 1.25).
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /app
 
