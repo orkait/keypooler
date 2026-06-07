@@ -30,6 +30,8 @@ func (s *Server) routeTiers(w http.ResponseWriter, r *http.Request) {
 		s.ListTiers(w, r)
 	case http.MethodPost:
 		s.CreateTier(w, r)
+	case http.MethodPatch:
+		s.UpdateTierFeatures(w, r)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}

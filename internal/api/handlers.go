@@ -140,6 +140,72 @@ func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// UpdateTierFeatures replaces the feature set (rate_limit + window_seconds) of an
+// existing tier, then reloads the pool so the new limits take effect immediately
+// for keys already in that tier.
+func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var body struct {
+		Name     string                      `json:"name"`
+		Features map[string]featureLimitBody `json:"features"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Name == "" || len(body.Features) == 0 {
+		writeError(w, http.StatusBadRequest, "name and features are required")
+		return
+	}
+
+	ctx := r.Context()
+
+	tier, err := s.DB.GetTierByName(ctx, body.Name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if tier == nil {
+		writeError(w, http.StatusNotFound, "tier not found: "+body.Name)
+		return
+	}
+
+	features := make([]*db.TierFeature, 0, len(body.Features))
+	respFeatures := make(map[string]any, len(body.Features))
+	for feature, fl := range body.Features {
+		window := fl.WindowSeconds
+		if window <= 0 {
+			window = 60
+		}
+		features = append(features, &db.TierFeature{
+			TierID:        tier.ID,
+			Feature:       feature,
+			RateLimit:     fl.RateLimit,
+			WindowSeconds: window,
+		})
+		respFeatures[feature] = map[string]any{"rate_limit": fl.RateLimit, "window_seconds": window}
+	}
+	if err := s.DB.SetTierFeatures(ctx, tier.ID, features); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to set features")
+		return
+	}
+
+	// Apply the new limits to the in-memory pool right away.
+	if err := s.Pool.ReloadKeys(); err != nil {
+		s.Logger.Error().Err(err).Str("tier", body.Name).Msg("failed to reload pool after tier update")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       tier.ID,
+		"name":     tier.Name,
+		"features": respFeatures,
+	})
+}
+
 // featureLimitBody is the per-feature rate-limit shape in tier requests.
 type featureLimitBody struct {
 	RateLimit     int `json:"rate_limit"`
