@@ -5,7 +5,7 @@
 **One source of truth for API keys in the orkait stack.** Round-robin rotation, per-feature rate limits, monthly usage budgets, scoped consumers, bound secrets, and opt-in encryption at rest.
 
 [![Live](https://img.shields.io/badge/live-keypooler.orkait.com-success?logo=railway&logoColor=white)](https://keypooler.orkait.com)
-[![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![CGO free](https://img.shields.io/badge/CGO-free-00ADD8?logo=go&logoColor=white)](#-tech)
 [![Turso](https://img.shields.io/badge/Turso-libSQL-4FF8D2?logo=sqlite&logoColor=black)](https://turso.tech)
 [![Deployed on Railway](https://img.shields.io/badge/deployed%20on-Railway-0B0D0E?logo=railway&logoColor=white)](https://railway.app)
@@ -198,4 +198,4 @@ railway up --service keypooler --detach        # from repo root
 
 ## 🧰 Tech
 
-Go 1.22 (CGO-free, fully static binary) · [Turso](https://turso.tech)/libSQL + [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (both pure Go) · AES-256-GCM · zerolog · stdlib `net/http` · distroless runtime image.
+Go 1.25 (CGO-free, fully static binary) · [Turso](https://turso.tech)/libSQL + [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (both pure Go) · AES-256-GCM · zerolog · stdlib `net/http` · distroless runtime image.
