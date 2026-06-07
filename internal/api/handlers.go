@@ -20,6 +20,7 @@ type Server struct {
 	DB     db.DBAdapter
 	Pool   *keypool.Manager
 	Cfg    *config.Config
+	Sealer *crypto.Sealer
 	Logger zerolog.Logger
 }
 
@@ -30,7 +31,8 @@ func (s *Server) HealthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetKey handles GET /key?feature=X
-// Returns a decrypted API key for the given feature, or 429 if none available.
+// Returns the API key value (decrypted if stored encrypted) for the given
+// feature, or 429 if none available.
 //
 // Auth is admin-OR-consumer (resolved by resolveKeyCaller, NOT AdminAuth):
 //   - admin token  -> superuser, may fetch any tier's keys (nil scope filter),
@@ -68,17 +70,17 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decrypted, err := crypto.Decrypt(key.KeyEncrypted, s.Cfg.EncryptionKey)
+	value, err := s.Sealer.Open(key.KeyValue)
 	if err != nil {
-		s.Logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to decrypt key")
-		writeError(w, http.StatusInternalServerError, "failed to decrypt key")
+		s.Logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to open key value")
+		writeError(w, http.StatusInternalServerError, "failed to read key")
 		return
 	}
 
 	// Audit the serve asynchronously: best-effort, never blocks the response.
 	s.recordUsageEventAsync(key.ID, caller.consumerID, feature)
 
-	// Secrets are decrypted on load by the manager; return them at this trusted
+	// Secrets are opened on load by the manager; return them at this trusted
 	// boundary alongside the key value and metadata.
 	secrets := key.Secrets
 	if secrets == nil {
@@ -91,7 +93,7 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"key_id":   key.ID,
-		"value":    decrypted,
+		"value":    value,
 		"metadata": metadata,
 		"secrets":  secrets,
 	})
@@ -335,22 +337,22 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	encrypted, err := crypto.Encrypt(body.Key, s.Cfg.EncryptionKey)
+	sealedKey, err := s.Sealer.Seal(body.Key)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to encrypt key")
+		writeError(w, http.StatusInternalServerError, "failed to seal key")
 		return
 	}
 
-	// Encrypt each bound secret before any persistence.
-	encSecrets := make([]*db.KeySecret, 0, len(body.Secrets))
+	// Seal each bound secret (encrypted iff encryption is enabled) before persisting.
+	sealedSecrets := make([]*db.KeySecret, 0, len(body.Secrets))
 	keyID := uuid.New().String()
 	for name, value := range body.Secrets {
-		encVal, eerr := crypto.Encrypt(value, s.Cfg.EncryptionKey)
+		sealedVal, eerr := s.Sealer.Seal(value)
 		if eerr != nil {
-			writeError(w, http.StatusInternalServerError, "failed to encrypt secret")
+			writeError(w, http.StatusInternalServerError, "failed to seal secret")
 			return
 		}
-		encSecrets = append(encSecrets, &db.KeySecret{KeyID: keyID, Name: name, ValueEncrypted: encVal})
+		sealedSecrets = append(sealedSecrets, &db.KeySecret{KeyID: keyID, Name: name, Value: sealedVal})
 	}
 
 	metadata := body.Metadata
@@ -361,7 +363,7 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 	key := &db.Key{
 		ID:                 keyID,
 		Name:               body.Name,
-		KeyEncrypted:       encrypted,
+		KeyValue:           sealedKey,
 		TierID:             tier.ID,
 		IsActive:           true,
 		ExpiresAt:          expiresAt,
@@ -376,8 +378,8 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(encSecrets) > 0 {
-		if err := s.DB.SetKeySecrets(ctx, key.ID, encSecrets); err != nil {
+	if len(sealedSecrets) > 0 {
+		if err := s.DB.SetKeySecrets(ctx, key.ID, sealedSecrets); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to store key secrets")
 			return
 		}
@@ -387,8 +389,8 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Error().Err(err).Msg("failed to reload key pool after adding key")
 	}
 
-	secretNames := make([]string, 0, len(encSecrets))
-	for _, sec := range encSecrets {
+	secretNames := make([]string, 0, len(sealedSecrets))
+	for _, sec := range sealedSecrets {
 		secretNames = append(secretNames, sec.Name)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{

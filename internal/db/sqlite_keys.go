@@ -153,7 +153,7 @@ func (a *SQLiteAdapter) GetTierFeatures(ctx context.Context, tierID string) ([]*
 
 // --- Keys ---
 
-const keyColumns = "id, name, key_encrypted, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json, created_at"
+const keyColumns = "id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json, created_at"
 
 // scanKey reads one key row in keyColumns order, parsing nullable and JSON fields.
 func scanKey(scan func(dest ...any) error) (*Key, error) {
@@ -164,7 +164,7 @@ func scanKey(scan func(dest ...any) error) (*Key, error) {
 	var usageWindowSeconds sql.NullInt64
 	var usageWindowStart sql.NullTime
 	var metadataJSON string
-	if err := scan(&k.ID, &k.Name, &k.KeyEncrypted, &k.TierID, &isActive, &expiresAt, &usageLimit, &k.UsageCount, &usageWindowSeconds, &usageWindowStart, &metadataJSON, &k.CreatedAt); err != nil {
+	if err := scan(&k.ID, &k.Name, &k.KeyValue, &k.TierID, &isActive, &expiresAt, &usageLimit, &k.UsageCount, &usageWindowSeconds, &usageWindowStart, &metadataJSON, &k.CreatedAt); err != nil {
 		return nil, err
 	}
 	k.IsActive = isActive != 0
@@ -220,8 +220,8 @@ func (a *SQLiteAdapter) CreateKey(ctx context.Context, key *Key) error {
 	}
 
 	_, err = a.db.ExecContext(ctx,
-		"INSERT INTO keys (id, name, key_encrypted, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		key.ID, key.Name, key.KeyEncrypted, key.TierID, boolToInt(key.IsActive), expiresAt, usageLimit, key.UsageCount, usageWindowSeconds, usageWindowStart, metadataJSON,
+		"INSERT INTO keys (id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		key.ID, key.Name, key.KeyValue, key.TierID, boolToInt(key.IsActive), expiresAt, usageLimit, key.UsageCount, usageWindowSeconds, usageWindowStart, metadataJSON,
 	)
 	return err
 }
@@ -291,7 +291,7 @@ func marshalMetadata(m map[string]any) (string, error) {
 
 func (a *SQLiteAdapter) DeleteKey(ctx context.Context, id string) error {
 	// Explicit child cleanup (FK enforcement is off by default): drop the key's
-	// bound secrets so deleting a key cannot leave orphan encrypted secrets behind.
+	// bound secrets so deleting a key cannot leave orphan secrets behind.
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -364,7 +364,7 @@ func (a *SQLiteAdapter) ResetUsageWindow(ctx context.Context, keyID string, star
 
 func (a *SQLiteAdapter) GetKeySecrets(ctx context.Context, keyID string) ([]*KeySecret, error) {
 	rows, err := a.db.QueryContext(ctx,
-		"SELECT key_id, name, value_encrypted FROM key_secrets WHERE key_id = ? ORDER BY name",
+		"SELECT key_id, name, value FROM key_secrets WHERE key_id = ? ORDER BY name",
 		keyID,
 	)
 	if err != nil {
@@ -375,7 +375,7 @@ func (a *SQLiteAdapter) GetKeySecrets(ctx context.Context, keyID string) ([]*Key
 	var secrets []*KeySecret
 	for rows.Next() {
 		var s KeySecret
-		if err := rows.Scan(&s.KeyID, &s.Name, &s.ValueEncrypted); err != nil {
+		if err := rows.Scan(&s.KeyID, &s.Name, &s.Value); err != nil {
 			return nil, err
 		}
 		secrets = append(secrets, &s)
@@ -397,8 +397,8 @@ func (a *SQLiteAdapter) SetKeySecrets(ctx context.Context, keyID string, secrets
 
 	for _, s := range secrets {
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO key_secrets (key_id, name, value_encrypted) VALUES (?, ?, ?)",
-			keyID, s.Name, s.ValueEncrypted,
+			"INSERT INTO key_secrets (key_id, name, value) VALUES (?, ?, ?)",
+			keyID, s.Name, s.Value,
 		); err != nil {
 			return err
 		}

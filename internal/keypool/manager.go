@@ -18,17 +18,17 @@ type Manager struct {
 	keys   []*PoolKey
 	rr     *RoundRobin
 	dbAdap db.DBAdapter
-	encKey string
+	sealer *crypto.Sealer
 	logger zerolog.Logger
 }
 
-// NewManager creates a key pool manager and loads keys from the database.
-// encKey is the hex-encoded encryption key used to decrypt bound secrets on load.
-func NewManager(dbAdap db.DBAdapter, encKey string, logger zerolog.Logger) (*Manager, error) {
+// NewManager creates a key pool manager and loads keys from the database. The
+// sealer opens (decrypts where tagged) bound secrets as keys are loaded.
+func NewManager(dbAdap db.DBAdapter, sealer *crypto.Sealer, logger zerolog.Logger) (*Manager, error) {
 	m := &Manager{
 		rr:     NewRoundRobin(),
 		dbAdap: dbAdap,
-		encKey: encKey,
+		sealer: sealer,
 		logger: logger.With().Str("component", "keypool").Logger(),
 	}
 
@@ -168,12 +168,12 @@ func (m *Manager) ReloadKeys() error {
 			continue
 		}
 
-		secrets := m.decryptSecrets(ctx, k.ID)
+		secrets := m.loadSecrets(ctx, k.ID)
 
 		if old, ok := existing[k.ID]; ok {
 			// Preserve runtime rate state, refresh DB-backed fields.
 			old.Name = k.Name
-			old.KeyEncrypted = k.KeyEncrypted
+			old.KeyValue = k.KeyValue
 			old.TierID = k.TierID
 			old.IsActive = k.IsActive
 			old.ExpiresAt = k.ExpiresAt
@@ -189,7 +189,7 @@ func (m *Manager) ReloadKeys() error {
 			newKeys = append(newKeys, &PoolKey{
 				ID:                 k.ID,
 				Name:               k.Name,
-				KeyEncrypted:       k.KeyEncrypted,
+				KeyValue:           k.KeyValue,
 				TierID:             k.TierID,
 				IsActive:           k.IsActive,
 				ExpiresAt:          k.ExpiresAt,
@@ -209,9 +209,10 @@ func (m *Manager) ReloadKeys() error {
 	return nil
 }
 
-// decryptSecrets loads and decrypts a key's bound secrets into a name->value map.
-// Decryption failures are logged (without values) and skipped.
-func (m *Manager) decryptSecrets(ctx context.Context, keyID string) map[string]string {
+// loadSecrets loads a key's bound secrets and opens each via the sealer (values
+// tagged as encrypted are decrypted, plaintext values pass through) into a
+// name->value map. Open failures are logged without the value and skipped.
+func (m *Manager) loadSecrets(ctx context.Context, keyID string) map[string]string {
 	rows, err := m.dbAdap.GetKeySecrets(ctx, keyID)
 	if err != nil {
 		m.logger.Error().Err(err).Str("key_id", keyID).Msg("failed to load key secrets")
@@ -222,9 +223,9 @@ func (m *Manager) decryptSecrets(ctx context.Context, keyID string) map[string]s
 	}
 	secrets := make(map[string]string, len(rows))
 	for _, s := range rows {
-		plain, derr := crypto.Decrypt(s.ValueEncrypted, m.encKey)
+		plain, derr := m.sealer.Open(s.Value)
 		if derr != nil {
-			m.logger.Error().Err(derr).Str("key_id", keyID).Str("secret", s.Name).Msg("failed to decrypt secret")
+			m.logger.Error().Err(derr).Str("key_id", keyID).Str("secret", s.Name).Msg("failed to open secret")
 			continue
 		}
 		secrets[s.Name] = plain

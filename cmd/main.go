@@ -10,6 +10,7 @@ import (
 
 	"key-pool-system/internal/api"
 	"key-pool-system/internal/config"
+	"key-pool-system/internal/crypto"
 	"key-pool-system/internal/db"
 	"key-pool-system/internal/keypool"
 	"key-pool-system/internal/util"
@@ -49,17 +50,25 @@ func main() {
 	cancel()
 	logger.Info().Msg("migrations completed")
 
+	// Encryption sealer: empty key => plaintext storage (default); a configured
+	// 32-byte hex key encrypts new key/secret writes (self-tagged enc:gcm:).
+	sealer, err := crypto.NewSealer(cfg.EncryptionKey)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("invalid encryption configuration")
+	}
+
 	// Key pool
-	poolMgr, err := keypool.NewManager(dbAdapter, cfg.EncryptionKey, logger)
+	poolMgr, err := keypool.NewManager(dbAdapter, sealer, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize key pool")
 	}
-	logger.Info().Int("pool_size", poolMgr.PoolSize()).Msg("key pool initialized")
+	logger.Info().Int("pool_size", poolMgr.PoolSize()).Bool("encryption", sealer.Enabled()).Msg("key pool initialized")
 
 	srv := &api.Server{
 		DB:     dbAdapter,
 		Pool:   poolMgr,
 		Cfg:    cfg,
+		Sealer: sealer,
 		Logger: logger,
 	}
 

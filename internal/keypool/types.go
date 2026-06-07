@@ -13,11 +13,11 @@ type FeatureLimit struct {
 
 // PoolKey is a runtime representation of an API key with rate tracking.
 type PoolKey struct {
-	ID           string
-	Name         string
-	KeyEncrypted string
-	TierID       string
-	IsActive     bool
+	ID       string
+	Name     string
+	KeyValue string
+	TierID   string
+	IsActive bool
 
 	ExpiresAt  *time.Time
 	UsageLimit *int
@@ -30,7 +30,7 @@ type PoolKey struct {
 	UsageWindowStart *time.Time
 	Metadata         map[string]any
 
-	// Secrets are decrypted name->value pairs, populated by the manager on load.
+	// Secrets are name->value pairs, populated by the manager on load.
 	Secrets map[string]string
 
 	// Features and their window-aware rate limits (from tier).

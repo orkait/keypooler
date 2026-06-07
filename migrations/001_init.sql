@@ -24,7 +24,7 @@ CREATE TABLE tier_features (
 CREATE TABLE keys (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    key_encrypted TEXT NOT NULL,
+    key_value TEXT NOT NULL,
     tier_id TEXT NOT NULL REFERENCES tiers(id),
     is_active INTEGER NOT NULL DEFAULT 1,
     expires_at TIMESTAMP,
@@ -38,7 +38,7 @@ CREATE TABLE keys (
 CREATE TABLE key_secrets (
     key_id TEXT NOT NULL REFERENCES keys(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
-    value_encrypted TEXT NOT NULL,
+    value TEXT NOT NULL,
     PRIMARY KEY(key_id, name)
 );
 CREATE TABLE consumers (

@@ -70,14 +70,14 @@ type TierFeature struct {
 
 // Key represents an API key in the pool.
 type Key struct {
-	ID           string
-	Name         string
-	KeyEncrypted string
-	TierID       string
-	IsActive     bool
-	ExpiresAt    *time.Time
-	UsageLimit   *int
-	UsageCount   int
+	ID         string
+	Name       string
+	KeyValue   string
+	TierID     string
+	IsActive   bool
+	ExpiresAt  *time.Time
+	UsageLimit *int
+	UsageCount int
 	// UsageWindowSeconds, when set, makes the usage_limit a per-window budget
 	// (e.g. 2592000 = 30 days). nil means the limit is a lifetime cap.
 	UsageWindowSeconds *int
@@ -88,11 +88,11 @@ type Key struct {
 	CreatedAt        time.Time
 }
 
-// KeySecret is a named encrypted secret bound to a key.
+// KeySecret is a named secret bound to a key, stored as plaintext.
 type KeySecret struct {
-	KeyID          string
-	Name           string
-	ValueEncrypted string
+	KeyID string
+	Name  string
+	Value string
 }
 
 // Consumer is a scoped API client. It authenticates with a bearer token whose
