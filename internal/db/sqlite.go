@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
@@ -40,9 +42,16 @@ func NewSQLiteAdapter(dbPath string, maxOpenConns int, busyTimeoutMS int) (*SQLi
 // ?authToken=. The SQL dialect is SQLite-compatible, so the same adapter methods and
 // migrations run unchanged.
 func NewLibsqlAdapter(dsn string, maxOpenConns int) (*SQLiteAdapter, error) {
+	// Parse first: a malformed dsn makes the driver's url.Parse error echo the raw
+	// URL (with its embedded authToken). Guard so that string never reaches a %w wrap
+	// or the logger.
+	if _, perr := url.Parse(dsn); perr != nil {
+		return nil, fmt.Errorf("invalid DATABASE_URL")
+	}
+
 	sqlDB, err := sql.Open("libsql", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open libsql database: %w", err)
+		return nil, fmt.Errorf("failed to open libsql database")
 	}
 
 	// libSQL is a network DB (not a single-file writer lock), so a small pool is fine.
@@ -51,9 +60,13 @@ func NewLibsqlAdapter(dsn string, maxOpenConns int) (*SQLiteAdapter, error) {
 	}
 	sqlDB.SetMaxOpenConns(maxOpenConns)
 	sqlDB.SetMaxIdleConns(maxOpenConns)
-	sqlDB.SetConnMaxLifetime(0)
+	// Remote streams: recycle before Turso server-side stream batons expire, and bound
+	// idle streams so a long-idle connection isn't handed out stale.
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(1 * time.Minute)
 
 	if err := sqlDB.Ping(); err != nil {
+		// A valid-URL ping error (dial/4xx/5xx) does not contain the token; safe to wrap.
 		return nil, fmt.Errorf("failed to ping libsql database: %w", err)
 	}
 

@@ -35,10 +35,14 @@ func validateAdminToken(token string) error {
 	return nil
 }
 
-// validateDBMaxOpenConns ensures SQLite uses exactly 1 connection
-func validateDBMaxOpenConns(conns int) error {
-	if conns != 1 {
-		return fmt.Errorf("DB_MAX_OPEN_CONNS must be 1 for SQLite, got %d", conns)
+// validateDBMaxOpenConns: local SQLite must use exactly 1 connection (single-writer
+// file lock); a remote libSQL/Turso DB has no such constraint and may use a pool.
+func validateDBMaxOpenConns(conns int, isRemote bool) error {
+	if conns < 1 {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS must be at least 1, got %d", conns)
+	}
+	if !isRemote && conns != 1 {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS must be 1 for local SQLite, got %d", conns)
 	}
 	return nil
 }

@@ -66,7 +66,7 @@ func (c *Config) validate() error {
 	if err := validateAdminToken(c.AdminToken); err != nil {
 		return err
 	}
-	if err := validateDBMaxOpenConns(c.DBMaxOpenConns); err != nil {
+	if err := validateDBMaxOpenConns(c.DBMaxOpenConns, c.DatabaseURL != ""); err != nil {
 		return err
 	}
 	if err := validateLogLevel(c.LogLevel); err != nil {
