@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"encoding/hex"
+	"fmt"
+)
 
 var (
 	ValidLogLevels = map[string]bool{
@@ -16,13 +19,18 @@ var (
 	}
 )
 
-// validateEncryptionKey checks if encryption key is valid
+// validateEncryptionKey: ENCRYPTION_KEY is optional. Empty selects plaintext
+// storage (the default). When set it must be 32 bytes of hex (64 chars) for
+// AES-256; new key/secret writes are then stored encrypted (enc:gcm: tag).
 func validateEncryptionKey(key string) error {
 	if key == "" {
-		return fmt.Errorf("ENCRYPTION_KEY is required - generate with: openssl rand -hex 32")
+		return nil
 	}
 	if len(key) != 64 { // 32 bytes hex = 64 characters
-		return fmt.Errorf("ENCRYPTION_KEY must be exactly 32 bytes (64 hex characters), got %d", len(key))
+		return fmt.Errorf("ENCRYPTION_KEY must be empty (plaintext) or exactly 32 bytes (64 hex characters), got %d", len(key))
+	}
+	if _, err := hex.DecodeString(key); err != nil {
+		return fmt.Errorf("ENCRYPTION_KEY must be valid hex: %w", err)
 	}
 	return nil
 }
@@ -35,10 +43,14 @@ func validateAdminToken(token string) error {
 	return nil
 }
 
-// validateDBMaxOpenConns ensures SQLite uses exactly 1 connection
-func validateDBMaxOpenConns(conns int) error {
-	if conns != 1 {
-		return fmt.Errorf("DB_MAX_OPEN_CONNS must be 1 for SQLite, got %d", conns)
+// validateDBMaxOpenConns: local SQLite must use exactly 1 connection (single-writer
+// file lock); a remote libSQL/Turso DB has no such constraint and may use a pool.
+func validateDBMaxOpenConns(conns int, isRemote bool) error {
+	if conns < 1 {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS must be at least 1, got %d", conns)
+	}
+	if !isRemote && conns != 1 {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS must be 1 for local SQLite, got %d", conns)
 	}
 	return nil
 }
