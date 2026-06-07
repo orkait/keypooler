@@ -7,9 +7,9 @@ data/
 # Secrets
 .env
 
-# Binary
-keypooler
-key-pool-system
+# Binary (root-anchored so the cmd/keypooler/ package is not ignored)
+/keypooler
+/key-pool-system
 
 # IDE
 .idea/
@@ -22,3 +22,9 @@ Thumbs.db
 
 # Dev notes
 indexes/
+
+# Local-only Dockerfile variants with BuildKit cache mounts (not for distribution)
+Dockerfile*.test
+
+# Local agent settings
+.claude/

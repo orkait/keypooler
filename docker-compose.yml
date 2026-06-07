@@ -1,5 +1,5 @@
 services:
-  key-pool-system:
+  keypooler:
     build:
       context: .
       dockerfile: Dockerfile
@@ -9,14 +9,7 @@ services:
       - .env
     volumes:
       - pool-data:/app/data
-      - ./scripts:/app/scripts
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
 volumes:
   pool-data:

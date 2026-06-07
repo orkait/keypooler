@@ -8,12 +8,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"key-pool-system/internal/api"
-	"key-pool-system/internal/config"
-	"key-pool-system/internal/crypto"
-	"key-pool-system/internal/db"
-	"key-pool-system/internal/keypool"
-	"key-pool-system/internal/util"
+	"github.com/orkait/keypooler/internal/api"
+	"github.com/orkait/keypooler/internal/config"
+	"github.com/orkait/keypooler/internal/crypto"
+	"github.com/orkait/keypooler/internal/db"
+	"github.com/orkait/keypooler/internal/keypool"
+	"github.com/orkait/keypooler/internal/util"
 
 	"github.com/rs/zerolog"
 )

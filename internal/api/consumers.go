@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"key-pool-system/internal/db"
+	"github.com/orkait/keypooler/internal/db"
 
 	"github.com/google/uuid"
 )

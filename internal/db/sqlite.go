@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/mattn/go-sqlite3"
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
+	_ "modernc.org/sqlite"
 )
 
 // SQLiteAdapter implements DBAdapter using SQLite
@@ -18,9 +18,10 @@ type SQLiteAdapter struct {
 
 // NewSQLiteAdapter creates a new SQLite database adapter
 func NewSQLiteAdapter(dbPath string, maxOpenConns int, busyTimeoutMS int) (*SQLiteAdapter, error) {
-	// Open database with busy_timeout and WAL mode for better read concurrency
-	dsn := fmt.Sprintf("file:%s?_busy_timeout=%d&_journal_mode=WAL", dbPath, busyTimeoutMS)
-	sqlDB, err := sql.Open("sqlite3", dsn)
+	// Open database with busy_timeout and WAL mode for better read concurrency.
+	// modernc.org/sqlite (pure Go, no CGO) takes pragmas via repeated _pragma= params.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)", dbPath, busyTimeoutMS)
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

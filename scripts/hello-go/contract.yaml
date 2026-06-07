@@ -1,8 +1,0 @@
-name: hello-go
-runtime: go
-functions:
-  greet:
-    feature: greeting
-    timeout: 10s
-    retry:
-      enabled: false
