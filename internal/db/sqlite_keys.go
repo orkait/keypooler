@@ -5,14 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // --- Tiers ---
 
 func (a *SQLiteAdapter) CreateTier(ctx context.Context, tier *Tier) error {
 	_, err := a.db.ExecContext(ctx,
-		"INSERT INTO tiers (id, name) VALUES (?, ?)",
-		tier.ID, tier.Name,
+		"INSERT INTO tiers (id, name, description) VALUES (?, ?, ?)",
+		tier.ID, tier.Name, tier.Description,
 	)
 	return err
 }
@@ -20,8 +21,8 @@ func (a *SQLiteAdapter) CreateTier(ctx context.Context, tier *Tier) error {
 func (a *SQLiteAdapter) GetTier(ctx context.Context, id string) (*Tier, error) {
 	var t Tier
 	err := a.db.QueryRowContext(ctx,
-		"SELECT id, name, created_at FROM tiers WHERE id = ?", id,
-	).Scan(&t.ID, &t.Name, &t.CreatedAt)
+		"SELECT id, name, description, created_at FROM tiers WHERE id = ?", id,
+	).Scan(&t.ID, &t.Name, &t.Description, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("tier not found")
 	}
@@ -31,8 +32,8 @@ func (a *SQLiteAdapter) GetTier(ctx context.Context, id string) (*Tier, error) {
 func (a *SQLiteAdapter) GetTierByName(ctx context.Context, name string) (*Tier, error) {
 	var t Tier
 	err := a.db.QueryRowContext(ctx,
-		"SELECT id, name, created_at FROM tiers WHERE name = ?", name,
-	).Scan(&t.ID, &t.Name, &t.CreatedAt)
+		"SELECT id, name, description, created_at FROM tiers WHERE name = ?", name,
+	).Scan(&t.ID, &t.Name, &t.Description, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -40,7 +41,7 @@ func (a *SQLiteAdapter) GetTierByName(ctx context.Context, name string) (*Tier, 
 }
 
 func (a *SQLiteAdapter) GetAllTiers(ctx context.Context) ([]*Tier, error) {
-	rows, err := a.db.QueryContext(ctx, "SELECT id, name, created_at FROM tiers ORDER BY name")
+	rows, err := a.db.QueryContext(ctx, "SELECT id, name, description, created_at FROM tiers ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +50,7 @@ func (a *SQLiteAdapter) GetAllTiers(ctx context.Context) ([]*Tier, error) {
 	var tiers []*Tier
 	for rows.Next() {
 		var t Tier
-		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		tiers = append(tiers, &t)
@@ -58,7 +59,36 @@ func (a *SQLiteAdapter) GetAllTiers(ctx context.Context) ([]*Tier, error) {
 }
 
 func (a *SQLiteAdapter) DeleteTier(ctx context.Context, id string) error {
-	result, err := a.db.ExecContext(ctx, "DELETE FROM tiers WHERE id = ?", id)
+	// Explicit child cleanup (FK enforcement is off by default): drop the tier's
+	// features and any consumer scopes pointing at it so a reused tier id cannot
+	// silently re-grant a previously-scoped consumer.
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM consumer_scopes WHERE tier_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM tier_features WHERE tier_id = ?", id); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM tiers WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("tier not found")
+	}
+	return tx.Commit()
+}
+
+func (a *SQLiteAdapter) UpdateTierDescription(ctx context.Context, id, description string) error {
+	result, err := a.db.ExecContext(ctx,
+		"UPDATE tiers SET description = ? WHERE id = ?",
+		description, id,
+	)
 	if err != nil {
 		return err
 	}
@@ -123,7 +153,7 @@ func (a *SQLiteAdapter) GetTierFeatures(ctx context.Context, tierID string) ([]*
 
 // --- Keys ---
 
-const keyColumns = "id, name, key_encrypted, tier_id, is_active, expires_at, usage_limit, usage_count, metadata_json, created_at"
+const keyColumns = "id, name, key_encrypted, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json, created_at"
 
 // scanKey reads one key row in keyColumns order, parsing nullable and JSON fields.
 func scanKey(scan func(dest ...any) error) (*Key, error) {
@@ -131,8 +161,10 @@ func scanKey(scan func(dest ...any) error) (*Key, error) {
 	var isActive int
 	var expiresAt sql.NullTime
 	var usageLimit sql.NullInt64
+	var usageWindowSeconds sql.NullInt64
+	var usageWindowStart sql.NullTime
 	var metadataJSON string
-	if err := scan(&k.ID, &k.Name, &k.KeyEncrypted, &k.TierID, &isActive, &expiresAt, &usageLimit, &k.UsageCount, &metadataJSON, &k.CreatedAt); err != nil {
+	if err := scan(&k.ID, &k.Name, &k.KeyEncrypted, &k.TierID, &isActive, &expiresAt, &usageLimit, &k.UsageCount, &usageWindowSeconds, &usageWindowStart, &metadataJSON, &k.CreatedAt); err != nil {
 		return nil, err
 	}
 	k.IsActive = isActive != 0
@@ -143,6 +175,14 @@ func scanKey(scan func(dest ...any) error) (*Key, error) {
 	if usageLimit.Valid {
 		v := int(usageLimit.Int64)
 		k.UsageLimit = &v
+	}
+	if usageWindowSeconds.Valid {
+		v := int(usageWindowSeconds.Int64)
+		k.UsageWindowSeconds = &v
+	}
+	if usageWindowStart.Valid {
+		t := usageWindowStart.Time
+		k.UsageWindowStart = &t
 	}
 	if metadataJSON == "" {
 		metadataJSON = "{}"
@@ -170,10 +210,18 @@ func (a *SQLiteAdapter) CreateKey(ctx context.Context, key *Key) error {
 	if key.UsageLimit != nil {
 		usageLimit = *key.UsageLimit
 	}
+	var usageWindowSeconds any
+	if key.UsageWindowSeconds != nil {
+		usageWindowSeconds = *key.UsageWindowSeconds
+	}
+	var usageWindowStart any
+	if key.UsageWindowStart != nil {
+		usageWindowStart = *key.UsageWindowStart
+	}
 
 	_, err = a.db.ExecContext(ctx,
-		"INSERT INTO keys (id, name, key_encrypted, tier_id, is_active, expires_at, usage_limit, usage_count, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		key.ID, key.Name, key.KeyEncrypted, key.TierID, boolToInt(key.IsActive), expiresAt, usageLimit, key.UsageCount, metadataJSON,
+		"INSERT INTO keys (id, name, key_encrypted, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		key.ID, key.Name, key.KeyEncrypted, key.TierID, boolToInt(key.IsActive), expiresAt, usageLimit, key.UsageCount, usageWindowSeconds, usageWindowStart, metadataJSON,
 	)
 	return err
 }
@@ -242,7 +290,17 @@ func marshalMetadata(m map[string]any) (string, error) {
 }
 
 func (a *SQLiteAdapter) DeleteKey(ctx context.Context, id string) error {
-	result, err := a.db.ExecContext(ctx, "DELETE FROM keys WHERE id = ?", id)
+	// Explicit child cleanup (FK enforcement is off by default): drop the key's
+	// bound secrets so deleting a key cannot leave orphan encrypted secrets behind.
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM key_secrets WHERE key_id = ?", id); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM keys WHERE id = ?", id)
 	if err != nil {
 		return err
 	}
@@ -250,7 +308,7 @@ func (a *SQLiteAdapter) DeleteKey(ctx context.Context, id string) error {
 	if n == 0 {
 		return fmt.Errorf("key not found")
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (a *SQLiteAdapter) SetKeyActive(ctx context.Context, id string, active bool) error {
@@ -272,6 +330,25 @@ func (a *SQLiteAdapter) IncrementUsage(ctx context.Context, keyID string) error 
 	result, err := a.db.ExecContext(ctx,
 		"UPDATE keys SET usage_count = usage_count + 1 WHERE id = ?",
 		keyID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("key not found")
+	}
+	return nil
+}
+
+// ResetUsageWindow zeroes the cumulative usage count and stamps a new window
+// start. Called when a windowed (e.g. monthly) usage budget has rolled over.
+// usage_count is set to 1 to account for the serve that triggered the reset, so
+// the DB stays consistent with the in-memory count (reset-to-0 then increment).
+func (a *SQLiteAdapter) ResetUsageWindow(ctx context.Context, keyID string, start time.Time) error {
+	result, err := a.db.ExecContext(ctx,
+		"UPDATE keys SET usage_count = 1, usage_window_start = ? WHERE id = ?",
+		start, keyID,
 	)
 	if err != nil {
 		return err

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"key-pool-system/internal/crypto"
 	"key-pool-system/internal/db"
 	"key-pool-system/internal/keypool"
+	"key-pool-system/internal/util"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -29,10 +31,22 @@ func (s *Server) HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 // GetKey handles GET /key?feature=X
 // Returns a decrypted API key for the given feature, or 429 if none available.
+//
+// Auth is admin-OR-consumer (resolved by resolveKeyCaller, NOT AdminAuth):
+//   - admin token  -> superuser, may fetch any tier's keys (nil scope filter),
+//     consumer id recorded as "admin".
+//   - consumer token -> may fetch only keys whose tier is in its consumer_scopes.
+//     401 for an unknown/inactive token; 403 when no scoped tier serves the
+//     feature with budget.
 func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
+	}
+
+	caller, ok := s.resolveKeyCaller(w, r)
+	if !ok {
+		return // resolveKeyCaller already wrote the 401
 	}
 
 	feature := r.URL.Query().Get("feature")
@@ -41,8 +55,15 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := s.Pool.GetKeyForFeature(feature)
+	key := s.Pool.GetKeyForFeature(feature, caller.allowedTierIDs)
 	if key == nil {
+		// A scoped consumer that got nothing may simply not be scoped to any tier
+		// that serves this feature -> that is an authorization (403) signal, not a
+		// transient 429. The admin (nil scope) only ever hits a true 429.
+		if caller.allowedTierIDs != nil {
+			writeError(w, http.StatusForbidden, "no key available for feature within your scope")
+			return
+		}
 		writeError(w, http.StatusTooManyRequests, "no key available for feature")
 		return
 	}
@@ -53,6 +74,9 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to decrypt key")
 		return
 	}
+
+	// Audit the serve asynchronously: best-effort, never blocks the response.
+	s.recordUsageEventAsync(key.ID, caller.consumerID, feature)
 
 	// Secrets are decrypted on load by the manager; return them at this trusted
 	// boundary alongside the key value and metadata.
@@ -73,6 +97,18 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// recordUsageEventAsync writes a usage_event in a detached goroutine so the audit
+// write never adds latency to the /key response. Failures are logged only.
+func (s *Server) recordUsageEventAsync(keyID, consumerID, feature string) {
+	go func() {
+		ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
+		defer cancel()
+		if err := s.DB.RecordUsageEvent(ctx, keyID, consumerID, feature); err != nil {
+			s.Logger.Error().Err(err).Str("key_id", keyID).Msg("failed to record usage event")
+		}
+	}()
+}
+
 // --- Admin endpoints ---
 
 // CreateTier handles POST /admin/tiers
@@ -83,8 +119,9 @@ func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name     string                      `json:"name"`
-		Features map[string]featureLimitBody `json:"features"`
+		Name        string                      `json:"name"`
+		Description string                      `json:"description"`
+		Features    map[string]featureLimitBody `json:"features"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -107,7 +144,7 @@ func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tier := &db.Tier{ID: uuid.New().String(), Name: body.Name}
+	tier := &db.Tier{ID: uuid.New().String(), Name: body.Name, Description: body.Description}
 	if err := s.DB.CreateTier(ctx, tier); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create tier")
 		return
@@ -134,9 +171,10 @@ func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":       tier.ID,
-		"name":     tier.Name,
-		"features": respFeatures,
+		"id":          tier.ID,
+		"name":        tier.Name,
+		"description": tier.Description,
+		"features":    respFeatures,
 	})
 }
 
@@ -150,8 +188,9 @@ func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name     string                      `json:"name"`
-		Features map[string]featureLimitBody `json:"features"`
+		Name        string                      `json:"name"`
+		Description *string                     `json:"description"`
+		Features    map[string]featureLimitBody `json:"features"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -172,6 +211,15 @@ func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
 	if tier == nil {
 		writeError(w, http.StatusNotFound, "tier not found: "+body.Name)
 		return
+	}
+
+	// Update description only when the field is present in the request.
+	if body.Description != nil {
+		if err := s.DB.UpdateTierDescription(ctx, tier.ID, *body.Description); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update description")
+			return
+		}
+		tier.Description = *body.Description
 	}
 
 	features := make([]*db.TierFeature, 0, len(body.Features))
@@ -200,9 +248,10 @@ func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":       tier.ID,
-		"name":     tier.Name,
-		"features": respFeatures,
+		"id":          tier.ID,
+		"name":        tier.Name,
+		"description": tier.Description,
+		"features":    respFeatures,
 	})
 }
 
@@ -233,7 +282,7 @@ func (s *Server) ListTiers(w http.ResponseWriter, r *http.Request) {
 		for _, f := range features {
 			fm[f.Feature] = map[string]any{"rate_limit": f.RateLimit, "window_seconds": f.WindowSeconds}
 		}
-		result[i] = map[string]any{"id": t.ID, "name": t.Name, "features": fm}
+		result[i] = map[string]any{"id": t.ID, "name": t.Name, "description": t.Description, "features": fm}
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -246,13 +295,14 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name       string            `json:"name"`
-		Key        string            `json:"key"`
-		Tier       string            `json:"tier"`
-		ExpiresAt  *string           `json:"expires_at"`
-		UsageLimit *int              `json:"usage_limit"`
-		Metadata   map[string]any    `json:"metadata"`
-		Secrets    map[string]string `json:"secrets"`
+		Name               string            `json:"name"`
+		Key                string            `json:"key"`
+		Tier               string            `json:"tier"`
+		ExpiresAt          *string           `json:"expires_at"`
+		UsageLimit         *int              `json:"usage_limit"`
+		UsageWindowSeconds *int              `json:"usage_window_seconds"`
+		Metadata           map[string]any    `json:"metadata"`
+		Secrets            map[string]string `json:"secrets"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -309,15 +359,17 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := &db.Key{
-		ID:           keyID,
-		Name:         body.Name,
-		KeyEncrypted: encrypted,
-		TierID:       tier.ID,
-		IsActive:     true,
-		ExpiresAt:    expiresAt,
-		UsageLimit:   body.UsageLimit,
-		UsageCount:   0,
-		Metadata:     metadata,
+		ID:                 keyID,
+		Name:               body.Name,
+		KeyEncrypted:       encrypted,
+		TierID:             tier.ID,
+		IsActive:           true,
+		ExpiresAt:          expiresAt,
+		UsageLimit:         body.UsageLimit,
+		UsageCount:         0,
+		UsageWindowSeconds: body.UsageWindowSeconds,
+		UsageWindowStart:   nil,
+		Metadata:           metadata,
 	}
 	if err := s.DB.CreateKey(ctx, key); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create key")
@@ -340,13 +392,14 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		secretNames = append(secretNames, sec.Name)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":           key.ID,
-		"name":         key.Name,
-		"tier":         body.Tier,
-		"expires_at":   body.ExpiresAt,
-		"usage_limit":  body.UsageLimit,
-		"metadata":     metadata,
-		"secret_names": secretNames,
+		"id":                   key.ID,
+		"name":                 key.Name,
+		"tier":                 body.Tier,
+		"expires_at":           body.ExpiresAt,
+		"usage_limit":          body.UsageLimit,
+		"usage_window_seconds": body.UsageWindowSeconds,
+		"metadata":             metadata,
+		"secret_names":         secretNames,
 	})
 }
 

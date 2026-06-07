@@ -22,7 +22,13 @@ type PoolKey struct {
 	ExpiresAt  *time.Time
 	UsageLimit *int
 	UsageCount int
-	Metadata   map[string]any
+	// UsageWindowSeconds, when set, turns UsageLimit into a per-window budget
+	// (e.g. 2592000 = 30 days). nil means UsageLimit is a lifetime cap.
+	UsageWindowSeconds *int
+	// UsageWindowStart marks the start of the current usage window. nil until the
+	// first window opens.
+	UsageWindowStart *time.Time
+	Metadata         map[string]any
 
 	// Secrets are decrypted name->value pairs, populated by the manager on load.
 	Secrets map[string]string
@@ -100,20 +106,43 @@ func (k *PoolKey) Available() bool {
 
 // TryConsumeUsage atomically checks and consumes one unit of the key's
 // cumulative usage budget. A key with no usage limit always succeeds and is not
-// counted. Returns false when the credit/usage limit is exhausted. The check and
-// the in-memory increment happen in one critical section so concurrent callers
-// cannot over-serve a limited key.
-func (k *PoolKey) TryConsumeUsage() bool {
+// counted.
+//
+// Window behaviour: when UsageWindowSeconds is set and the current window has
+// elapsed (now - UsageWindowStart >= window), the in-memory count is reset to 0
+// and the window restarts at now BEFORE the limit check. The reset is reported
+// via the returned didReset/windowStart so the caller can persist it. When
+// UsageWindowSeconds is nil the limit is a lifetime cap (the original behaviour).
+//
+// The window-check, reset, limit-check, and increment all happen in one critical
+// section under the key lock so concurrent callers cannot over-serve a limited
+// key and cannot double-reset a window.
+func (k *PoolKey) TryConsumeUsage() (ok bool, didReset bool, windowStart time.Time) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.UsageLimit == nil {
-		return true
+		return true, false, time.Time{}
 	}
+
+	if k.UsageWindowSeconds != nil && *k.UsageWindowSeconds > 0 {
+		now := time.Now()
+		window := time.Duration(*k.UsageWindowSeconds) * time.Second
+		// A nil window start means the window has never opened; open it now.
+		// Otherwise roll the window over once it has fully elapsed.
+		if k.UsageWindowStart == nil || now.Sub(*k.UsageWindowStart) >= window {
+			k.UsageCount = 0
+			start := now
+			k.UsageWindowStart = &start
+			didReset = true
+			windowStart = start
+		}
+	}
+
 	if k.UsageCount >= *k.UsageLimit {
-		return false
+		return false, didReset, windowStart
 	}
 	k.UsageCount++
-	return true
+	return true, didReset, windowStart
 }
 
 // UsageSnapshot reads the cumulative usage count under the key lock (for the

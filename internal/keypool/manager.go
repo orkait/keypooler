@@ -41,14 +41,22 @@ func NewManager(dbAdap db.DBAdapter, encKey string, logger zerolog.Logger) (*Man
 
 // GetKeyForFeature selects an available key that supports the given feature
 // and has rate budget remaining.
-func (m *Manager) GetKeyForFeature(feature string) *PoolKey {
+//
+// allowedTierIDs scopes the selection: only keys whose TierID is present in the
+// map are considered. A nil map means no scoping (admin / superuser sees every
+// tier). An empty (non-nil) map means the caller is scoped to nothing and no key
+// is returned.
+func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]bool) *PoolKey {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	// Filter to keys that are available (active, unexpired, under usage limit),
-	// support this feature, and have rate budget.
+	// in an allowed tier, support this feature, and have rate budget.
 	var available []*PoolKey
 	for _, key := range m.keys {
+		if allowedTierIDs != nil && !allowedTierIDs[key.TierID] {
+			continue
+		}
 		if !key.Available() {
 			continue
 		}
@@ -77,13 +85,15 @@ func (m *Manager) GetKeyForFeature(feature string) *PoolKey {
 			available = removeKey(available, selected)
 			continue
 		}
-		// Atomic cumulative usage/credit gate.
-		if !selected.TryConsumeUsage() {
+		// Atomic cumulative usage/credit gate. The gate also rolls over a windowed
+		// (monthly) budget in-memory and reports whether a reset happened.
+		ok, didReset, windowStart := selected.TryConsumeUsage()
+		if !ok {
 			available = removeKey(available, selected)
 			continue
 		}
 		if selected.UsageLimit != nil {
-			m.persistUsage(selected)
+			m.persistUsage(selected, didReset, windowStart)
 		}
 		return selected
 	}
@@ -91,13 +101,22 @@ func (m *Manager) GetKeyForFeature(feature string) *PoolKey {
 	return nil
 }
 
-// persistUsage writes the cumulative usage increment to the DB so a restart
-// resumes the count (the in-memory increment already happened atomically in
-// TryConsumeUsage). Single-replica assumption: under multiple replicas the
-// in-memory count is per-replica; only the DB count is authoritative.
-func (m *Manager) persistUsage(key *PoolKey) {
+// persistUsage writes the cumulative usage change to the DB so a restart resumes
+// the count (the in-memory mutation already happened atomically in
+// TryConsumeUsage). When a windowed budget just rolled over (didReset), it
+// persists the reset (usage_count=1, fresh usage_window_start) instead of a plain
+// increment, keeping the DB consistent with the in-memory reset-then-increment.
+// Single-replica assumption: under multiple replicas the in-memory count is
+// per-replica; only the DB count is authoritative.
+func (m *Manager) persistUsage(key *PoolKey, didReset bool, windowStart time.Time) {
 	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
 	defer cancel()
+	if didReset {
+		if err := m.dbAdap.ResetUsageWindow(ctx, key.ID, windowStart); err != nil {
+			m.logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to persist usage window reset")
+		}
+		return
+	}
 	if err := m.dbAdap.IncrementUsage(ctx, key.ID); err != nil {
 		m.logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to persist usage increment")
 	}
@@ -160,23 +179,27 @@ func (m *Manager) ReloadKeys() error {
 			old.ExpiresAt = k.ExpiresAt
 			old.UsageLimit = k.UsageLimit
 			old.UsageCount = k.UsageCount
+			old.UsageWindowSeconds = k.UsageWindowSeconds
+			old.UsageWindowStart = k.UsageWindowStart
 			old.Metadata = k.Metadata
 			old.Secrets = secrets
 			old.Features = features
 			newKeys = append(newKeys, old)
 		} else {
 			newKeys = append(newKeys, &PoolKey{
-				ID:           k.ID,
-				Name:         k.Name,
-				KeyEncrypted: k.KeyEncrypted,
-				TierID:       k.TierID,
-				IsActive:     k.IsActive,
-				ExpiresAt:    k.ExpiresAt,
-				UsageLimit:   k.UsageLimit,
-				UsageCount:   k.UsageCount,
-				Metadata:     k.Metadata,
-				Secrets:      secrets,
-				Features:     features,
+				ID:                 k.ID,
+				Name:               k.Name,
+				KeyEncrypted:       k.KeyEncrypted,
+				TierID:             k.TierID,
+				IsActive:           k.IsActive,
+				ExpiresAt:          k.ExpiresAt,
+				UsageLimit:         k.UsageLimit,
+				UsageCount:         k.UsageCount,
+				UsageWindowSeconds: k.UsageWindowSeconds,
+				UsageWindowStart:   k.UsageWindowStart,
+				Metadata:           k.Metadata,
+				Secrets:            secrets,
+				Features:           features,
 			})
 		}
 	}

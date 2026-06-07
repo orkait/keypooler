@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
 )
@@ -88,4 +89,9 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// uuidString generates a random UUID for server-assigned row identifiers.
+func uuidString() string {
+	return uuid.New().String()
 }
