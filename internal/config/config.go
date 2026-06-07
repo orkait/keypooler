@@ -18,6 +18,7 @@ type Config struct {
 	DBPath          string
 	DBMaxOpenConns  int
 	DBBusyTimeoutMS int
+	DatabaseURL     string // libsql:// URL for Turso; when set, overrides local SQLite
 
 	// Security
 	EncryptionKey string
@@ -41,6 +42,7 @@ func Load() (*Config, error) {
 		DBPath:          getEnv("DB_PATH", "./data/pool.db"),
 		DBMaxOpenConns:  getEnvAsInt("DB_MAX_OPEN_CONNS", 1),
 		DBBusyTimeoutMS: getEnvAsInt("DB_BUSY_TIMEOUT_MS", 5000),
+		DatabaseURL:     getEnv("DATABASE_URL", ""),
 
 		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
 		AdminToken:    getEnv("ADMIN_TOKEN", ""),

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
 )
 
 // SQLiteAdapter implements DBAdapter using SQLite
@@ -29,6 +30,31 @@ func NewSQLiteAdapter(dbPath string, maxOpenConns int, busyTimeoutMS int) (*SQLi
 	// Test connection
 	if err := sqlDB.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	return &SQLiteAdapter{db: sqlDB}, nil
+}
+
+// NewLibsqlAdapter opens a Turso/libSQL database over the network via the standard
+// database/sql interface (pure Go, no CGO). dsn is the full libsql:// URL including
+// ?authToken=. The SQL dialect is SQLite-compatible, so the same adapter methods and
+// migrations run unchanged.
+func NewLibsqlAdapter(dsn string, maxOpenConns int) (*SQLiteAdapter, error) {
+	sqlDB, err := sql.Open("libsql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open libsql database: %w", err)
+	}
+
+	// libSQL is a network DB (not a single-file writer lock), so a small pool is fine.
+	if maxOpenConns < 1 {
+		maxOpenConns = 1
+	}
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+	sqlDB.SetMaxIdleConns(maxOpenConns)
+	sqlDB.SetConnMaxLifetime(0)
+
+	if err := sqlDB.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping libsql database: %w", err)
 	}
 
 	return &SQLiteAdapter{db: sqlDB}, nil

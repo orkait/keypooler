@@ -27,8 +27,15 @@ func main() {
 	logger := setupLogger(cfg)
 	logger.Info().Msg("starting keypooler")
 
-	// Database
-	dbAdapter, err := db.NewSQLiteAdapter(cfg.DBPath, cfg.DBMaxOpenConns, cfg.DBBusyTimeoutMS)
+	// Database: Turso/libSQL when DATABASE_URL is set, else local SQLite.
+	var dbAdapter *db.SQLiteAdapter
+	if cfg.DatabaseURL != "" {
+		logger.Info().Msg("using libSQL (Turso) database")
+		dbAdapter, err = db.NewLibsqlAdapter(cfg.DatabaseURL, cfg.DBMaxOpenConns)
+	} else {
+		logger.Info().Str("path", cfg.DBPath).Msg("using local SQLite database")
+		dbAdapter, err = db.NewSQLiteAdapter(cfg.DBPath, cfg.DBMaxOpenConns, cfg.DBBusyTimeoutMS)
+	}
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize database")
 	}
