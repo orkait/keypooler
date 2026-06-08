@@ -483,7 +483,8 @@ func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"pool_size": s.Pool.PoolSize(),
+		"pool_size":  s.Pool.PoolSize(),
+		"encryption": s.Sealer.Enabled(),
 	})
 }
 
