@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/orkait/keypooler/internal/config"
@@ -14,6 +15,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
+
+// exhaustedEvent is the audit feature name recorded when a consumer reports a key spent.
+const exhaustedEvent = "exhausted"
 
 // Server holds all dependencies needed by HTTP handlers.
 type Server struct {
@@ -435,23 +439,75 @@ func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 		if ks.ExpiresAt != nil {
 			expiresAt = ks.ExpiresAt.UTC().Format(time.RFC3339)
 		}
+		var exhaustedUntil any
+		if ks.ExhaustedUntil != nil {
+			exhaustedUntil = ks.ExhaustedUntil.UTC().Format(time.RFC3339)
+		}
 		result[i] = map[string]any{
-			"id":           ks.ID,
-			"name":         ks.Name,
-			"tier_id":      ks.TierID,
-			"is_active":    ks.IsActive,
-			"expires_at":   expiresAt,
-			"usage_limit":  ks.UsageLimit,
-			"usage_count":  ks.UsageCount,
-			"metadata":     metadata,
-			"secret_names": secretNames,
-			"usage":        usage,
+			"id":              ks.ID,
+			"name":            ks.Name,
+			"tier_id":         ks.TierID,
+			"is_active":       ks.IsActive,
+			"expires_at":      expiresAt,
+			"exhausted_until": exhaustedUntil,
+			"usage_limit":     ks.UsageLimit,
+			"usage_count":     ks.UsageCount,
+			"metadata":        metadata,
+			"secret_names":    secretNames,
+			"usage":           usage,
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
 }
 
 // DeleteKey handles DELETE /admin/keys/{id}
+// ExhaustKey handles POST /key/{id}/exhausted with body {"until": RFC3339}.
+// A consumer reports a key the provider refused for the rest of its billing
+// period; the pool stops serving it until then and resumes on its own. Auth is
+// admin-OR-consumer like GetKey; a consumer may only report keys in its scope.
+func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	caller, ok := s.resolveKeyCaller(w, r)
+	if !ok {
+		return
+	}
+	id := extractPathParam(r.URL.Path, "/key/")
+	if id == "" || !strings.HasSuffix(r.URL.Path, "/exhausted") {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var body struct {
+		Until string `json:"until"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	until, err := time.Parse(time.RFC3339, body.Until)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "until must be RFC3339")
+		return
+	}
+	tierID, found := s.Pool.TierOf(id)
+	if !found {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	if caller.allowedTierIDs != nil && !caller.allowedTierIDs[tierID] {
+		writeError(w, http.StatusForbidden, "key is outside your scope")
+		return
+	}
+	s.Pool.MarkExhausted(id, until)
+	s.recordUsageEventAsync(id, caller.consumerID, exhaustedEvent)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "exhausted",
+		"until":  until.UTC().Format(time.RFC3339),
+	})
+}
+
 func (s *Server) DeleteKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

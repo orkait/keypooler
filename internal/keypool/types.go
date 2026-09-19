@@ -28,7 +28,10 @@ type PoolKey struct {
 	// UsageWindowStart marks the start of the current usage window. nil until the
 	// first window opens.
 	UsageWindowStart *time.Time
-	Metadata         map[string]any
+	// ExhaustedUntil keeps the key out of rotation until it passes: a consumer
+	// reported the provider refusing it for the rest of its billing period.
+	ExhaustedUntil *time.Time
+	Metadata       map[string]any
 
 	// Secrets are name->value pairs, populated by the manager on load.
 	Secrets map[string]string
@@ -98,7 +101,11 @@ func (k *PoolKey) Available() bool {
 	if !k.IsActive {
 		return false
 	}
-	if k.ExpiresAt != nil && !time.Now().Before(*k.ExpiresAt) {
+	now := time.Now()
+	if k.ExpiresAt != nil && !now.Before(*k.ExpiresAt) {
+		return false
+	}
+	if k.ExhaustedUntil != nil && now.Before(*k.ExhaustedUntil) {
 		return false
 	}
 	return true

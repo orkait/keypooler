@@ -141,6 +141,7 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 |---|---|---|---|
 | `GET` | `/health` | public | liveness |
 | `GET` | `/key?feature=X` | admin **or** consumer | draw a rotated key for a feature |
+| `POST` | `/key/{id}/exhausted` | admin **or** consumer | report a key the provider refused; body `{"until": RFC3339}`, the key is skipped until then and serves again on its own |
 | `GET` `POST` `PATCH` | `/admin/tiers` | admin | list / create / update tier features |
 | `GET` `POST` | `/admin/keys` | admin | list / add keys |
 | `DELETE` | `/admin/keys/{id}` | admin | remove a key (+ its secrets) |

@@ -153,7 +153,7 @@ func (a *SQLiteAdapter) GetTierFeatures(ctx context.Context, tierID string) ([]*
 
 // --- Keys ---
 
-const keyColumns = "id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json, created_at"
+const keyColumns = "id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, exhausted_until, metadata_json, created_at"
 
 // scanKey reads one key row in keyColumns order, parsing nullable and JSON fields.
 func scanKey(scan func(dest ...any) error) (*Key, error) {
@@ -163,14 +163,19 @@ func scanKey(scan func(dest ...any) error) (*Key, error) {
 	var usageLimit sql.NullInt64
 	var usageWindowSeconds sql.NullInt64
 	var usageWindowStart sql.NullTime
+	var exhaustedUntil sql.NullTime
 	var metadataJSON string
-	if err := scan(&k.ID, &k.Name, &k.KeyValue, &k.TierID, &isActive, &expiresAt, &usageLimit, &k.UsageCount, &usageWindowSeconds, &usageWindowStart, &metadataJSON, &k.CreatedAt); err != nil {
+	if err := scan(&k.ID, &k.Name, &k.KeyValue, &k.TierID, &isActive, &expiresAt, &usageLimit, &k.UsageCount, &usageWindowSeconds, &usageWindowStart, &exhaustedUntil, &metadataJSON, &k.CreatedAt); err != nil {
 		return nil, err
 	}
 	k.IsActive = isActive != 0
 	if expiresAt.Valid {
 		t := expiresAt.Time
 		k.ExpiresAt = &t
+	}
+	if exhaustedUntil.Valid {
+		t := exhaustedUntil.Time
+		k.ExhaustedUntil = &t
 	}
 	if usageLimit.Valid {
 		v := int(usageLimit.Int64)
@@ -349,6 +354,21 @@ func (a *SQLiteAdapter) ResetUsageWindow(ctx context.Context, keyID string, star
 	result, err := a.db.ExecContext(ctx,
 		"UPDATE keys SET usage_count = 1, usage_window_start = ? WHERE id = ?",
 		start, keyID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("key not found")
+	}
+	return nil
+}
+
+func (a *SQLiteAdapter) SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error {
+	result, err := a.db.ExecContext(ctx,
+		"UPDATE keys SET exhausted_until = ? WHERE id = ?",
+		until, keyID,
 	)
 	if err != nil {
 		return err
