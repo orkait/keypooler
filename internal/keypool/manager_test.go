@@ -35,6 +35,7 @@ func (n *noopDB) GetAllKeys(context.Context) ([]*db.Key, error)                 
 func (n *noopDB) GetKeysByTier(context.Context, string) ([]*db.Key, error)           { return nil, nil }
 func (n *noopDB) DeleteKey(context.Context, string) error                            { return nil }
 func (n *noopDB) SetKeyActive(context.Context, string, bool) error                   { return nil }
+func (n *noopDB) SetKeyExhausted(context.Context, string, time.Time) error           { return nil }
 func (n *noopDB) GetKeySecrets(context.Context, string) ([]*db.KeySecret, error)     { return nil, nil }
 func (n *noopDB) SetKeySecrets(context.Context, string, []*db.KeySecret) error       { return nil }
 func (n *noopDB) CreateConsumer(context.Context, *db.Consumer) error                 { return nil }
@@ -114,6 +115,45 @@ func TestExpiredKeyNotServed(t *testing.T) {
 	m := &Manager{keys: []*PoolKey{key}, rr: NewRoundRobin(), dbAdap: &noopDB{}, logger: zerolog.Nop()}
 	if got := m.GetKeyForFeature("f", nil); got != nil {
 		t.Fatalf("expired key was served")
+	}
+}
+
+// A key a consumer reported spent is skipped until its time, then serves again on
+// its own; the report is what the provider's refusal becomes in the pool.
+func TestExhaustedKeyIsSkippedUntilItsTime(t *testing.T) {
+	spent := &PoolKey{
+		ID:       "spent",
+		IsActive: true,
+		Features: map[string]FeatureLimit{"f": {RateLimit: 10, WindowSeconds: 60}},
+	}
+	fresh := &PoolKey{
+		ID:       "fresh",
+		IsActive: true,
+		Features: map[string]FeatureLimit{"f": {RateLimit: 10, WindowSeconds: 60}},
+	}
+	m := &Manager{keys: []*PoolKey{spent, fresh}, rr: NewRoundRobin(), dbAdap: &noopDB{}, logger: zerolog.Nop()}
+
+	if !m.MarkExhausted("spent", time.Now().Add(time.Hour)) {
+		t.Fatalf("known key reported unknown")
+	}
+	if m.MarkExhausted("nobody", time.Now()) {
+		t.Fatalf("unknown key reported known")
+	}
+	for i := 0; i < 4; i++ {
+		if got := m.GetKeyForFeature("f", nil); got == nil || got.ID != "fresh" {
+			t.Fatalf("draw %d served %v, want fresh", i, got)
+		}
+	}
+
+	m.MarkExhausted("spent", time.Now().Add(-time.Second))
+	served := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		if got := m.GetKeyForFeature("f", nil); got != nil {
+			served[got.ID] = true
+		}
+	}
+	if !served["spent"] {
+		t.Fatalf("key stayed out of rotation after its time passed")
 	}
 }
 

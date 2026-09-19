@@ -15,6 +15,8 @@ func NewRouter(srv *Server) http.Handler {
 	// Key acquisition: admin-OR-consumer auth handled inside GetKey
 	// (resolveKeyCaller), NOT AdminAuth, so consumer tokens are accepted.
 	mux.Handle("/key", http.HandlerFunc(srv.GetKey))
+	// POST /key/{id}/exhausted: same admin-OR-consumer auth, scope-checked inside.
+	mux.Handle("/key/", http.HandlerFunc(srv.ExhaustKey))
 
 	// Admin (admin-token only)
 	admin := AdminAuth(srv.Cfg.AdminToken, srv.Logger)

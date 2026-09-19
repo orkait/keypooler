@@ -34,6 +34,8 @@ type DBAdapter interface {
 	// ResetUsageWindow zeroes usage_count and stamps a fresh usage_window_start.
 	// Used when a key's monthly (windowed) usage budget rolls over.
 	ResetUsageWindow(ctx context.Context, keyID string, start time.Time) error
+	// SetKeyExhausted keeps the key out of rotation until `until`.
+	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
 
 	// Key Secrets
 	GetKeySecrets(ctx context.Context, keyID string) ([]*KeySecret, error)
@@ -84,8 +86,11 @@ type Key struct {
 	// UsageWindowStart is the start of the current usage window. nil until the
 	// first window opens.
 	UsageWindowStart *time.Time
-	Metadata         map[string]any
-	CreatedAt        time.Time
+	// ExhaustedUntil, when set and in the future, keeps the key out of rotation: a
+	// consumer reported the provider refusing it for the rest of its billing period.
+	ExhaustedUntil *time.Time
+	Metadata       map[string]any
+	CreatedAt      time.Time
 }
 
 // KeySecret is a named secret bound to a key, stored as plaintext.

@@ -181,6 +181,7 @@ func (m *Manager) ReloadKeys() error {
 			old.UsageCount = k.UsageCount
 			old.UsageWindowSeconds = k.UsageWindowSeconds
 			old.UsageWindowStart = k.UsageWindowStart
+			old.ExhaustedUntil = k.ExhaustedUntil
 			old.Metadata = k.Metadata
 			old.Secrets = secrets
 			old.Features = features
@@ -197,6 +198,7 @@ func (m *Manager) ReloadKeys() error {
 				UsageCount:         k.UsageCount,
 				UsageWindowSeconds: k.UsageWindowSeconds,
 				UsageWindowStart:   k.UsageWindowStart,
+				ExhaustedUntil:     k.ExhaustedUntil,
 				Metadata:           k.Metadata,
 				Secrets:            secrets,
 				Features:           features,
@@ -233,6 +235,40 @@ func (m *Manager) loadSecrets(ctx context.Context, keyID string) map[string]stri
 	return secrets
 }
 
+// TierOf reports the tier a pooled key belongs to, and false when the key is unknown.
+func (m *Manager) TierOf(id string) (tierID string, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, key := range m.keys {
+		if key.ID == id {
+			return key.TierID, true
+		}
+	}
+	return "", false
+}
+
+// MarkExhausted takes a key out of rotation until `until` and persists it. The
+// provider decides when a key is spent, so this is the consumer telling the pool
+// what it was told; the key serves again on its own once the time passes.
+func (m *Manager) MarkExhausted(id string, until time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, key := range m.keys {
+		if key.ID != id {
+			continue
+		}
+		u := until
+		key.ExhaustedUntil = &u
+		ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
+		defer cancel()
+		if err := m.dbAdap.SetKeyExhausted(ctx, id, until); err != nil {
+			m.logger.Error().Err(err).Str("key_id", id).Msg("failed to persist exhausted_until")
+		}
+		return true
+	}
+	return false
+}
+
 // PoolSize returns the number of keys in the pool.
 func (m *Manager) PoolSize() int {
 	m.mu.RLock()
@@ -252,16 +288,17 @@ func (m *Manager) GetHealthStatus() []KeyHealth {
 			secretNames = append(secretNames, name)
 		}
 		statuses[i] = KeyHealth{
-			ID:          key.ID,
-			Name:        key.Name,
-			TierID:      key.TierID,
-			IsActive:    key.IsActive,
-			ExpiresAt:   key.ExpiresAt,
-			UsageLimit:  key.UsageLimit,
-			UsageCount:  key.UsageSnapshot(),
-			Metadata:    key.Metadata,
-			SecretNames: secretNames,
-			Usage:       key.RateUsage(),
+			ID:             key.ID,
+			Name:           key.Name,
+			TierID:         key.TierID,
+			IsActive:       key.IsActive,
+			ExpiresAt:      key.ExpiresAt,
+			ExhaustedUntil: key.ExhaustedUntil,
+			UsageLimit:     key.UsageLimit,
+			UsageCount:     key.UsageSnapshot(),
+			Metadata:       key.Metadata,
+			SecretNames:    secretNames,
+			Usage:          key.RateUsage(),
 		}
 	}
 	return statuses
@@ -270,16 +307,17 @@ func (m *Manager) GetHealthStatus() []KeyHealth {
 // KeyHealth is a read-only snapshot of a key's health. It never carries
 // decrypted secret values, only their names.
 type KeyHealth struct {
-	ID          string
-	Name        string
-	TierID      string
-	IsActive    bool
-	ExpiresAt   *time.Time
-	UsageLimit  *int
-	UsageCount  int
-	Metadata    map[string]any
-	SecretNames []string
-	Usage       map[string]RateInfo
+	ID             string
+	Name           string
+	TierID         string
+	IsActive       bool
+	ExpiresAt      *time.Time
+	ExhaustedUntil *time.Time
+	UsageLimit     *int
+	UsageCount     int
+	Metadata       map[string]any
+	SecretNames    []string
+	Usage          map[string]RateInfo
 }
 
 func removeKey(keys []*PoolKey, target *PoolKey) []*PoolKey {
