@@ -32,10 +32,10 @@ func main() {
 	var dbAdapter *db.SQLiteAdapter
 	if cfg.DatabaseURL != "" {
 		logger.Info().Msg("using libSQL (Turso) database")
-		dbAdapter, err = db.NewLibsqlAdapter(cfg.DatabaseURL, cfg.DBMaxOpenConns)
+		dbAdapter, err = db.NewLibsqlAdapter(cfg.DatabaseURL)
 	} else {
 		logger.Info().Str("path", cfg.DBPath).Msg("using local SQLite database")
-		dbAdapter, err = db.NewSQLiteAdapter(cfg.DBPath, cfg.DBMaxOpenConns, cfg.DBBusyTimeoutMS)
+		dbAdapter, err = db.NewSQLiteAdapter(cfg.DBPath, cfg.DBBusyTimeoutMS)
 	}
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize database")
