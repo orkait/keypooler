@@ -163,7 +163,6 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 | `ENCRYPTION_KEY` | *(empty = plaintext)* | 32-byte hex; when set, new writes are encrypted |
 | `DATABASE_URL` | *(empty)* | `libsql://…` Turso URL; set ⇒ Turso, unset ⇒ local SQLite |
 | `DB_PATH` | `./data/pool.db` | local SQLite path |
-| `DB_MAX_OPEN_CONNS` | `1` | local SQLite must be `1`; a remote libSQL pool may be higher |
 | `DB_BUSY_TIMEOUT_MS` | `5000` | local SQLite busy timeout |
 | `SERVER_PORT` | `8080` | listen port |
 | `SERVER_{READ,WRITE,IDLE,SHUTDOWN}_TIMEOUT_SECONDS` | `30/30/120/30` | HTTP server timeouts |
