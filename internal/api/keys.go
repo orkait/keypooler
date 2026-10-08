@@ -52,57 +52,61 @@ type addKeyBody struct {
 	Budget             *budgetBody       `json:"budget"`
 }
 
-func decodeAddKey(w http.ResponseWriter, r *http.Request) (addKeyBody, *time.Time, bool) {
-	var body addKeyBody
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return body, nil, false
-	}
-	if body.Name == "" || body.Key == "" || body.Tier == "" {
-		writeError(w, http.StatusBadRequest, "name, key, and tier are required")
-		return body, nil, false
-	}
-	if _, err := body.Budget.budget(); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return body, nil, false
-	}
-	if body.ExpiresAt == nil || *body.ExpiresAt == "" {
-		return body, nil, true
-	}
-	expiresAt, err := time.Parse(time.RFC3339, *body.ExpiresAt)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "expires_at must be RFC3339")
-		return body, nil, false
-	}
-	return body, &expiresAt, true
+type newKey struct {
+	body      addKeyBody
+	expiresAt *time.Time
+	budget    *db.Budget
 }
 
-func (s *Server) sealedRows(body addKeyBody, tierID string, expiresAt *time.Time) (*db.Key, []*db.KeySecret, error) {
-	sealedKey, err := s.Sealer.Seal(body.Key)
-	if err != nil {
-		return nil, nil, err
+func decodeAddKey(w http.ResponseWriter, r *http.Request) (newKey, bool) {
+	var k newKey
+	if !decodeBody(w, r, &k.body) {
+		return k, false
 	}
-	budget, err := body.Budget.budget()
+	if k.body.Name == "" || k.body.Key == "" || k.body.Tier == "" {
+		writeError(w, http.StatusBadRequest, "name, key, and tier are required")
+		return k, false
+	}
+	budget, err := k.body.Budget.budget()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return k, false
+	}
+	k.budget = budget
+	if k.body.ExpiresAt == nil || *k.body.ExpiresAt == "" {
+		return k, true
+	}
+	expiresAt, err := time.Parse(time.RFC3339, *k.body.ExpiresAt)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "expires_at must be RFC3339")
+		return k, false
+	}
+	k.expiresAt = &expiresAt
+	return k, true
+}
+
+func (s *Server) sealedRows(k newKey, tierID string) (*db.Key, []*db.KeySecret, error) {
+	sealedKey, err := s.Sealer.Seal(k.body.Key)
 	if err != nil {
 		return nil, nil, err
 	}
 	key := &db.Key{
-		Budget:             budget,
+		Budget:             k.budget,
 		ID:                 uuid.New().String(),
-		Name:               body.Name,
+		Name:               k.body.Name,
 		KeyValue:           sealedKey,
 		TierID:             tierID,
 		IsActive:           true,
-		ExpiresAt:          expiresAt,
-		UsageLimit:         body.UsageLimit,
-		UsageWindowSeconds: body.UsageWindowSeconds,
-		Metadata:           body.Metadata,
+		ExpiresAt:          k.expiresAt,
+		UsageLimit:         k.body.UsageLimit,
+		UsageWindowSeconds: k.body.UsageWindowSeconds,
+		Metadata:           k.body.Metadata,
 	}
 	if key.Metadata == nil {
 		key.Metadata = map[string]any{}
 	}
-	secrets := make([]*db.KeySecret, 0, len(body.Secrets))
-	for name, value := range body.Secrets {
+	secrets := make([]*db.KeySecret, 0, len(k.body.Secrets))
+	for name, value := range k.body.Secrets {
 		sealed, err := s.Sealer.Seal(value)
 		if err != nil {
 			return nil, nil, err
@@ -113,21 +117,16 @@ func (s *Server) sealedRows(body addKeyBody, tierID string, expiresAt *time.Time
 }
 
 func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
-	body, expiresAt, ok := decodeAddKey(w, r)
+	k, ok := decodeAddKey(w, r)
 	if !ok {
 		return
 	}
 	ctx := r.Context()
-	tier, err := s.DB.GetTierByName(ctx, body.Tier)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
+	tier, ok := s.tierNamed(ctx, w, k.body.Tier)
+	if !ok {
 		return
 	}
-	if tier == nil {
-		writeError(w, http.StatusNotFound, "tier not found: "+body.Tier)
-		return
-	}
-	key, secrets, err := s.sealedRows(body, tier.ID, expiresAt)
+	key, secrets, err := s.sealedRows(k, tier.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to seal key")
 		return
@@ -144,10 +143,10 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, addedKey{
 		ID:                 key.ID,
 		Name:               key.Name,
-		Tier:               body.Tier,
-		ExpiresAt:          body.ExpiresAt,
-		UsageLimit:         body.UsageLimit,
-		UsageWindowSeconds: body.UsageWindowSeconds,
+		Tier:               k.body.Tier,
+		ExpiresAt:          k.body.ExpiresAt,
+		UsageLimit:         k.body.UsageLimit,
+		UsageWindowSeconds: k.body.UsageWindowSeconds,
 		Metadata:           key.Metadata,
 		SecretNames:        names,
 	})
@@ -197,8 +196,7 @@ func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Until string `json:"until"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeBody(w, r, &body) {
 		return
 	}
 	until, err := time.Parse(time.RFC3339, body.Until)
@@ -206,18 +204,25 @@ func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "until must be RFC3339")
 		return
 	}
-	tierID, found := s.Pool.TierOf(id)
-	if !found {
-		writeError(w, http.StatusNotFound, "key not found")
-		return
-	}
-	if caller.allowedTierIDs != nil && !caller.allowedTierIDs[tierID] {
-		writeError(w, http.StatusForbidden, "key is outside your scope")
+	if !s.keyInScope(w, caller, id) {
 		return
 	}
 	s.Pool.MarkExhausted(id, until)
 	s.Usage.Event(db.NewUsageEvent(id, caller.consumerID, exhaustedEvent))
 	writeJSON(w, http.StatusOK, exhaustedKey{Status: statusExhausted, Until: rfc3339(until)})
+}
+
+func (s *Server) keyInScope(w http.ResponseWriter, caller keyCaller, id string) bool {
+	tierID, found := s.Pool.TierOf(id)
+	if !found {
+		writeError(w, http.StatusNotFound, keypool.ErrUnknownKey.Error())
+		return false
+	}
+	if caller.allowedTierIDs != nil && !caller.allowedTierIDs[tierID] {
+		writeError(w, http.StatusForbidden, "key is outside your scope")
+		return false
+	}
+	return true
 }
 
 func (s *Server) DeleteKey(w http.ResponseWriter, r *http.Request) {

@@ -41,9 +41,13 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorBody{Error: message})
 }
 
-func decodeJSON(r *http.Request, dst any) error {
+func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxBodySize)
-	return json.NewDecoder(r.Body).Decode(dst)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, msgInvalidJSON+err.Error())
+		return false
+	}
+	return true
 }
 
 func parseLimit(raw string, def, max int) int {
