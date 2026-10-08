@@ -87,6 +87,40 @@ func TestAKeyIsStoredWithItsTierLimitsAndSecretsAndEchoedWithoutThem(t *testing.
 	}
 }
 
+type poolStore struct{ consumerDB }
+
+func (*poolStore) GetAllKeys(context.Context) ([]*db.Key, error) {
+	return []*db.Key{{ID: "k", KeyValue: "v", TierID: "groq_chat", IsActive: true}}, nil
+}
+
+func (*poolStore) TierFeaturesByTier(context.Context) (map[string][]*db.TierFeature, error) {
+	return map[string][]*db.TierFeature{"groq_chat": {{TierID: "groq_chat", Feature: "spent", RateLimit: 0, WindowSeconds: 60}}}, nil
+}
+
+func (*poolStore) KeySecretsByKey(context.Context) (map[string][]*db.KeySecret, error) {
+	return nil, nil
+}
+
+func TestAScopedConsumerIsForbiddenOutOfScopeAndThrottledWhenSpent(t *testing.T) {
+	store := &poolStore{consumerDB{active: true}}
+	sealer, _ := crypto.NewSealer("")
+	pool, err := keypool.NewManager(store, sealer, writeback.New(nil, zerolog.Nop()), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := authServer(&store.consumerDB)
+	s.DB, s.Pool, s.Sealer = store, pool, sealer
+	for feature, want := range map[string]int{"spent": http.StatusTooManyRequests, "elsewhere": http.StatusForbidden} {
+		r := httptest.NewRequest(http.MethodGet, "/key?feature="+feature, nil)
+		r.Header.Set("Authorization", "Bearer "+consumerToken)
+		w := httptest.NewRecorder()
+		NewRouter(s).ServeHTTP(w, r)
+		if w.Code != want {
+			t.Errorf("feature %s answered %d, want %d", feature, w.Code, want)
+		}
+	}
+}
+
 func TestAKeyThatCannotBeAddedSaysWhy(t *testing.T) {
 	cases := map[string]struct {
 		body   string

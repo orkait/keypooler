@@ -2,6 +2,7 @@ package keypool
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -51,58 +52,57 @@ func NewManager(dbAdap Store, sealer *crypto.Sealer, usage *writeback.Writer, lo
 	return m, nil
 }
 
-// candidates are the keys that could serve the feature right now: in an allowed
-// tier (nil allows every tier), available (active, unexpired, not exhausted,
-// under its usage limit) and offering the feature. Callers hold m.mu.
-func (m *Manager) candidates(feature string, allowedTierIDs map[string]bool) []*PoolKey {
-	var found []*PoolKey
-	for _, key := range m.keys {
-		if allowedTierIDs != nil && !allowedTierIDs[key.TierID] {
-			continue
-		}
-		if key.Available() && key.HasFeature(feature) {
-			found = append(found, key)
-		}
-	}
-	return found
+var (
+	ErrOutOfScope = errors.New("no key in scope serves the feature")
+	ErrExhausted  = errors.New("no key available for feature")
+)
+
+// Served is a drawn key's fields, copied under the pool lock so a reload cannot
+// rewrite them while the caller reads.
+type Served struct {
+	ID       string
+	KeyValue string
+	Metadata map[string]any
+	Secrets  map[string]string
 }
 
-// GetKeyForFeature selects an available key that supports the given feature
-// and has rate budget remaining.
-//
-// allowedTierIDs scopes the selection: only keys whose TierID is present in the
-// map are considered. A nil map means no scoping (admin / superuser sees every
-// tier). An empty (non-nil) map means the caller is scoped to nothing and no key
-// is returned.
-func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]bool) *PoolKey {
+func (m *Manager) candidates(feature string, allowedTierIDs map[string]bool) (available []*PoolKey, offered bool) {
+	for _, key := range m.keys {
+		if (allowedTierIDs != nil && !allowedTierIDs[key.TierID]) || !key.HasFeature(feature) {
+			continue
+		}
+		offered = true
+		if key.Available() {
+			available = append(available, key)
+		}
+	}
+	return available, offered
+}
+
+// GetKeyForFeature draws a key in an allowed tier (nil allows every tier) with
+// rate and usage budget left. The rate window is tried first so a rate-blocked
+// key does not consume usage.
+func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]bool) (*Served, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	available := m.candidates(feature, allowedTierIDs)
+	available, offered := m.candidates(feature, allowedTierIDs)
 	for len(available) > 0 {
 		selected := m.rr.Select(available)
-		if selected == nil {
-			return nil
+		if selected.TryRate(feature) {
+			if ok, didReset, windowStart := selected.TryConsumeUsage(); ok {
+				if selected.UsageLimit != nil {
+					m.persistUsage(selected, didReset, windowStart)
+				}
+				return &Served{ID: selected.ID, KeyValue: selected.KeyValue, Metadata: selected.Metadata, Secrets: selected.Secrets}, nil
+			}
 		}
-
-		// Rate window first (cheap, resets per window) so a usage-exhausted key
-		// does not waste a credit, and a rate-blocked key does not consume usage.
-		if !selected.TryRate(feature) {
-			available = removeKey(available, selected)
-			continue
-		}
-		ok, didReset, windowStart := selected.TryConsumeUsage()
-		if !ok {
-			available = removeKey(available, selected)
-			continue
-		}
-		if selected.UsageLimit != nil {
-			m.persistUsage(selected, didReset, windowStart)
-		}
-		return selected
+		available = removeKey(available, selected)
 	}
-
-	return nil
+	if !offered {
+		return nil, ErrOutOfScope
+	}
+	return nil, ErrExhausted
 }
 
 // persistUsage queues the cumulative usage change (the in-memory mutation already
@@ -201,38 +201,43 @@ func (m *Manager) openSecrets(keyID string, rows []*db.KeySecret) map[string]str
 	return secrets
 }
 
+func (m *Manager) find(id string) *PoolKey {
+	for _, key := range m.keys {
+		if key.ID == id {
+			return key
+		}
+	}
+	return nil
+}
+
 // TierOf reports the tier a pooled key belongs to, and false when the key is unknown.
 func (m *Manager) TierOf(id string) (tierID string, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for _, key := range m.keys {
-		if key.ID == id {
-			return key.TierID, true
-		}
+	if key := m.find(id); key != nil {
+		return key.TierID, true
 	}
 	return "", false
 }
 
-// MarkExhausted takes a key out of rotation until `until` and persists it. The
-// provider decides when a key is spent, so this is the consumer telling the pool
-// what it was told; the key serves again on its own once the time passes.
+// MarkExhausted takes a key out of rotation until `until`, then persists it
+// outside the pool lock so draws never wait on the database.
 func (m *Manager) MarkExhausted(id string, until time.Time) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, key := range m.keys {
-		if key.ID != id {
-			continue
-		}
-		u := until
-		key.ExhaustedUntil = &u
-		ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
-		defer cancel()
-		if err := m.dbAdap.SetKeyExhausted(ctx, id, until); err != nil {
-			m.logger.Error().Err(err).Str("key_id", id).Msg("failed to persist exhausted_until")
-		}
-		return true
+	key := m.find(id)
+	if key != nil {
+		key.ExhaustedUntil = &until
 	}
-	return false
+	m.mu.Unlock()
+	if key == nil {
+		return false
+	}
+	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
+	defer cancel()
+	if err := m.dbAdap.SetKeyExhausted(ctx, id, until); err != nil {
+		m.logger.Error().Err(err).Str("key_id", id).Msg("failed to persist exhausted_until")
+	}
+	return true
 }
 
 // PoolSize returns the number of keys in the pool.

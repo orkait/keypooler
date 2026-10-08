@@ -1,10 +1,12 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/orkait/keypooler/internal/db"
+	"github.com/orkait/keypooler/internal/keypool"
 
 	"github.com/google/uuid"
 )
@@ -31,16 +33,13 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := s.Pool.GetKeyForFeature(feature, caller.allowedTierIDs)
-	if key == nil {
-		// A scoped consumer that got nothing may simply not be scoped to any tier
-		// that serves this feature -> that is an authorization (403) signal, not a
-		// transient 429. The admin (nil scope) only ever hits a true 429.
-		if caller.allowedTierIDs != nil {
-			writeError(w, http.StatusForbidden, "no key available for feature within your scope")
-			return
-		}
-		writeError(w, http.StatusTooManyRequests, "no key available for feature")
+	key, err := s.Pool.GetKeyForFeature(feature, caller.allowedTierIDs)
+	if errors.Is(err, keypool.ErrOutOfScope) && caller.allowedTierIDs != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusTooManyRequests, keypool.ErrExhausted.Error())
 		return
 	}
 

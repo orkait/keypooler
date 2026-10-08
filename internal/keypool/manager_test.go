@@ -58,6 +58,11 @@ func (f *fakeStore) ResetUsageWindow(context.Context, string, time.Time, int) er
 	return nil
 }
 
+func draw(m *Manager, feature string) *Served {
+	key, _ := m.GetKeyForFeature(feature, nil)
+	return key
+}
+
 func TestAReloadRefreshesAKeysFieldsAndKeepsItsRateWindow(t *testing.T) {
 	store := &fakeStore{
 		keys: []*db.Key{{ID: "k", Name: "before", TierID: "t", IsActive: true}},
@@ -69,7 +74,7 @@ func TestAReloadRefreshesAKeysFieldsAndKeepsItsRateWindow(t *testing.T) {
 	if err := m.ReloadKeys(); err != nil {
 		t.Fatal(err)
 	}
-	if m.GetKeyForFeature("chat", nil) == nil {
+	if draw(m, "chat") == nil {
 		t.Fatal("first draw within the rate limit must serve")
 	}
 
@@ -77,7 +82,7 @@ func TestAReloadRefreshesAKeysFieldsAndKeepsItsRateWindow(t *testing.T) {
 	if err := m.ReloadKeys(); err != nil {
 		t.Fatal(err)
 	}
-	if m.GetKeyForFeature("chat", nil) != nil {
+	if draw(m, "chat") != nil {
 		t.Fatal("a reload must not reset the rate window: the second draw is over the limit")
 	}
 	if got := m.GetHealthStatus()[0].Name; got != "after" {
@@ -85,6 +90,75 @@ func TestAReloadRefreshesAKeysFieldsAndKeepsItsRateWindow(t *testing.T) {
 	}
 	if m.keys[0].Secrets == nil {
 		t.Fatal("a key without secrets must load an empty map, which a draw answers as {}")
+	}
+}
+
+func TestADrawIsNotTornByAConcurrentReload(t *testing.T) {
+	store := &fakeStore{
+		keys:     []*db.Key{{ID: "k", KeyValue: "v", TierID: "t", IsActive: true}},
+		features: map[string][]*db.TierFeature{"t": {{TierID: "t", Feature: "chat", RateLimit: 1 << 30, WindowSeconds: 60}}},
+	}
+	m := &Manager{rr: NewRoundRobin(), dbAdap: store, logger: zerolog.Nop()}
+	if err := m.ReloadKeys(); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			if k := draw(m, "chat"); k == nil || k.KeyValue != "v" || k.Metadata != nil || k.Secrets == nil {
+				t.Error("draw lost its fields")
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			_ = m.ReloadKeys()
+		}
+	}()
+	wg.Wait()
+}
+
+type slowExhaust struct {
+	*fakeStore
+	entered, release chan struct{}
+}
+
+func (s slowExhaust) SetKeyExhausted(context.Context, string, time.Time) error {
+	close(s.entered)
+	<-s.release
+	return nil
+}
+
+func TestReportingAKeyExhaustedDoesNotHoldUpDraws(t *testing.T) {
+	store := slowExhaust{
+		fakeStore: &fakeStore{
+			keys:     []*db.Key{{ID: "spent", TierID: "t", IsActive: true}, {ID: "fresh", TierID: "t", IsActive: true}},
+			features: map[string][]*db.TierFeature{"t": {{TierID: "t", Feature: "f", RateLimit: 10, WindowSeconds: 60}}},
+		},
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer close(store.release)
+	m := &Manager{rr: NewRoundRobin(), dbAdap: store, logger: zerolog.Nop()}
+	if err := m.ReloadKeys(); err != nil {
+		t.Fatal(err)
+	}
+	go m.MarkExhausted("spent", time.Now().Add(time.Hour))
+	<-store.entered
+
+	drawn := make(chan *Served, 1)
+	go func() { drawn <- draw(m, "f") }()
+	select {
+	case got := <-drawn:
+		if got == nil || got.ID != "fresh" {
+			t.Fatalf("drew %v, want fresh", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a draw waited on the exhausted write to the database")
 	}
 }
 
@@ -101,16 +175,16 @@ func TestAReloadKeepsServesTheDatabaseHasNotSeenYet(t *testing.T) {
 			if err := m.ReloadKeys(); err != nil {
 				t.Fatal(err)
 			}
-			if m.GetKeyForFeature("chat", nil) == nil {
+			if draw(m, "chat") == nil {
 				t.Fatal("first serve refused")
 			}
 			if err := m.ReloadKeys(); err != nil {
 				t.Fatal(err)
 			}
-			if m.GetKeyForFeature("chat", nil) == nil {
+			if draw(m, "chat") == nil {
 				t.Fatal("second serve refused")
 			}
-			if m.GetKeyForFeature("chat", nil) != nil {
+			if draw(m, "chat") != nil {
 				t.Fatal("the reload forgot an unflushed serve: the key served past its limit")
 			}
 		})
@@ -161,7 +235,7 @@ func TestUsageLimitNoOverServeUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if m.GetKeyForFeature("f", nil) != nil {
+			if draw(m, "f") != nil {
 				atomic.AddInt32(&served, 1)
 			}
 		}()
@@ -190,7 +264,7 @@ func TestExpiredKeyNotServed(t *testing.T) {
 		Features:  map[string]FeatureLimit{"f": {RateLimit: 10, WindowSeconds: 60}},
 	}
 	m := &Manager{keys: []*PoolKey{key}, rr: NewRoundRobin(), dbAdap: &fakeStore{}, logger: zerolog.Nop()}
-	if got := m.GetKeyForFeature("f", nil); got != nil {
+	if got := draw(m, "f"); got != nil {
 		t.Fatalf("expired key was served")
 	}
 }
@@ -217,7 +291,7 @@ func TestExhaustedKeyIsSkippedUntilItsTime(t *testing.T) {
 		t.Fatalf("unknown key reported known")
 	}
 	for i := 0; i < 4; i++ {
-		if got := m.GetKeyForFeature("f", nil); got == nil || got.ID != "fresh" {
+		if got := draw(m, "f"); got == nil || got.ID != "fresh" {
 			t.Fatalf("draw %d served %v, want fresh", i, got)
 		}
 	}
@@ -225,7 +299,7 @@ func TestExhaustedKeyIsSkippedUntilItsTime(t *testing.T) {
 	m.MarkExhausted("spent", time.Now().Add(-time.Second))
 	served := map[string]bool{}
 	for i := 0; i < 4; i++ {
-		if got := m.GetKeyForFeature("f", nil); got != nil {
+		if got := draw(m, "f"); got != nil {
 			served[got.ID] = true
 		}
 	}
@@ -252,18 +326,18 @@ func TestUsageWindowResetResumesServing(t *testing.T) {
 
 	// First window: exactly `limit` serves, then exhausted.
 	for i := 0; i < limit; i++ {
-		if m.GetKeyForFeature("f", nil) == nil {
+		if draw(m, "f") == nil {
 			t.Fatalf("serve %d within window should succeed", i+1)
 		}
 	}
-	if m.GetKeyForFeature("f", nil) != nil {
+	if draw(m, "f") != nil {
 		t.Fatalf("key should be exhausted within the window")
 	}
 
 	// Wait for the window to elapse, then the budget rolls over and serving resumes.
 	time.Sleep(time.Duration(window)*time.Second + 200*time.Millisecond)
 
-	if m.GetKeyForFeature("f", nil) == nil {
+	if draw(m, "f") == nil {
 		t.Fatalf("key should serve again after the usage window reset")
 	}
 
