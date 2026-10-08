@@ -161,15 +161,9 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to seal key")
 		return
 	}
-	if err := s.DB.CreateKey(ctx, key); err != nil {
+	if err := s.DB.CreateKey(ctx, key, secrets); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create key")
 		return
-	}
-	if len(secrets) > 0 {
-		if err := s.DB.SetKeySecrets(ctx, key.ID, secrets); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to store key secrets")
-			return
-		}
 	}
 	if err := s.Pool.ReloadKeys(); err != nil {
 		s.Logger.Error().Err(err).Msg("failed to reload key pool after adding key")

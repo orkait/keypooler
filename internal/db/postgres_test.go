@@ -86,10 +86,10 @@ func TestKeysKeepNullableFieldsMetadataAndCounters(t *testing.T) {
 	limit, window := 1000, 2592000
 	expires := time.Date(2027, 1, 2, 3, 4, 5, 123456000, time.UTC)
 	if err := a.CreateKey(ctx, &Key{ID: "k1", Name: "one", KeyValue: "enc:gcm:x", TierID: "t", IsActive: true,
-		ExpiresAt: &expires, UsageLimit: &limit, UsageWindowSeconds: &window, Metadata: map[string]any{"account": "a1"}}); err != nil {
+		ExpiresAt: &expires, UsageLimit: &limit, UsageWindowSeconds: &window, Metadata: map[string]any{"account": "a1"}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.CreateKey(ctx, &Key{ID: "k2", Name: "two", KeyValue: "v", TierID: "t"}); err != nil {
+	if err := a.CreateKey(ctx, &Key{ID: "k2", Name: "two", KeyValue: "v", TierID: "t"}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,20 +132,23 @@ func TestKeysKeepNullableFieldsMetadataAndCounters(t *testing.T) {
 	}
 }
 
-func TestSecretsAreReplacedWholeAndGoWithTheirKey(t *testing.T) {
+func TestAKeyAndItsSecretsLandTogetherOrNotAtAllAndGoTogether(t *testing.T) {
 	a, ctx := freshDB(t), context.Background()
 	seedTier(t, a, "t")
-	if err := a.CreateKey(ctx, &Key{ID: "k", Name: "k", KeyValue: "v", TierID: "t", IsActive: true}); err != nil {
-		t.Fatal(err)
+	twice := []*KeySecret{{KeyID: "bad", Name: "dup", Value: "1"}, {KeyID: "bad", Name: "dup", Value: "2"}}
+	if err := a.CreateKey(ctx, &Key{ID: "bad", Name: "bad", KeyValue: "v", TierID: "t"}, twice); err == nil {
+		t.Fatal("a secret that cannot be stored must fail the key with it")
 	}
-	if err := a.SetKeySecrets(ctx, "k", []*KeySecret{{Name: "a", Value: "1"}, {Name: "b", Value: "2"}}); err != nil {
-		t.Fatal(err)
+	if _, err := a.GetKey(ctx, "bad"); err == nil {
+		t.Fatal("the key of a failed create was left behind")
 	}
-	if err := a.SetKeySecrets(ctx, "k", []*KeySecret{{Name: "c", Value: "3"}}); err != nil {
+
+	secrets := []*KeySecret{{KeyID: "k", Name: "a", Value: "1"}, {KeyID: "k", Name: "b", Value: "2"}}
+	if err := a.CreateKey(ctx, &Key{ID: "k", Name: "k", KeyValue: "v", TierID: "t", IsActive: true}, secrets); err != nil {
 		t.Fatal(err)
 	}
 	byKey, err := a.KeySecretsByKey(ctx)
-	if err != nil || len(byKey["k"]) != 1 || byKey["k"][0].Name != "c" {
+	if err != nil || len(byKey["k"]) != 2 || byKey["k"][0].Name != "a" {
 		t.Fatalf("secrets %+v err %v", byKey, err)
 	}
 	if err := a.DeleteKey(ctx, "k"); err != nil {

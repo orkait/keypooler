@@ -32,13 +32,8 @@ func (k *keyStore) GetTierByName(_ context.Context, name string) (*db.Tier, erro
 	return &db.Tier{ID: "tier-1", Name: name}, nil
 }
 
-func (k *keyStore) CreateKey(_ context.Context, key *db.Key) error {
-	k.created = key
-	return nil
-}
-
-func (k *keyStore) SetKeySecrets(_ context.Context, _ string, secrets []*db.KeySecret) error {
-	k.secrets = secrets
+func (k *keyStore) CreateKey(_ context.Context, key *db.Key, secrets []*db.KeySecret) error {
+	k.created, k.secrets = key, secrets
 	return nil
 }
 

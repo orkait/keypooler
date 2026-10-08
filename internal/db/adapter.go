@@ -24,7 +24,7 @@ type DBAdapter interface {
 	TierFeaturesByTier(ctx context.Context) (map[string][]*TierFeature, error)
 
 	// Keys
-	CreateKey(ctx context.Context, key *Key) error
+	CreateKey(ctx context.Context, key *Key, secrets []*KeySecret) error
 	GetKey(ctx context.Context, id string) (*Key, error)
 	GetAllKeys(ctx context.Context) ([]*Key, error)
 	GetKeysByTier(ctx context.Context, tierID string) ([]*Key, error)
@@ -40,7 +40,6 @@ type DBAdapter interface {
 
 	// Key Secrets
 	KeySecretsByKey(ctx context.Context) (map[string][]*KeySecret, error)
-	SetKeySecrets(ctx context.Context, keyID string, secrets []*KeySecret) error
 
 	// Consumers
 	CreateConsumer(ctx context.Context, consumer *Consumer) error

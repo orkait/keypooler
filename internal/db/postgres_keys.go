@@ -169,16 +169,34 @@ func scanKey(scan func(dest ...any) error) (*Key, error) {
 	return &k, nil
 }
 
-func (a *PostgresAdapter) CreateKey(ctx context.Context, key *Key) error {
+// CreateKey stores a key and its bound secrets in one transaction: a key is never
+// served without the secrets it was added with.
+func (a *PostgresAdapter) CreateKey(ctx context.Context, key *Key, secrets []*KeySecret) error {
 	metadataJSON, err := marshalMetadata(key.Metadata)
 	if err != nil {
 		return err
 	}
-	_, err = a.pool.Exec(ctx,
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
 		"INSERT INTO keys (id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
 		key.ID, key.Name, key.KeyValue, key.TierID, key.IsActive, key.ExpiresAt, key.UsageLimit, key.UsageCount, key.UsageWindowSeconds, key.UsageWindowStart, metadataJSON,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	for _, s := range secrets {
+		if _, err := tx.Exec(ctx,
+			"INSERT INTO key_secrets (key_id, name, value) VALUES ($1, $2, $3)",
+			key.ID, s.Name, s.Value,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (a *PostgresAdapter) GetKey(ctx context.Context, id string) (*Key, error) {
@@ -298,26 +316,4 @@ func (a *PostgresAdapter) KeySecretsByKey(ctx context.Context) (map[string][]*Ke
 		byKey[s.KeyID] = append(byKey[s.KeyID], &s)
 	}
 	return byKey, rows.Err()
-}
-
-// SetKeySecrets replaces all secrets for a key inside a single transaction.
-func (a *PostgresAdapter) SetKeySecrets(ctx context.Context, keyID string, secrets []*KeySecret) error {
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	if _, err := tx.Exec(ctx, "DELETE FROM key_secrets WHERE key_id = $1", keyID); err != nil {
-		return err
-	}
-	for _, s := range secrets {
-		if _, err := tx.Exec(ctx,
-			"INSERT INTO key_secrets (key_id, name, value) VALUES ($1, $2, $3)",
-			keyID, s.Name, s.Value,
-		); err != nil {
-			return err
-		}
-	}
-	return tx.Commit(ctx)
 }
