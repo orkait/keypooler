@@ -13,6 +13,7 @@ type DBAdapter interface {
 	GetAllTiers(ctx context.Context) ([]*Tier, error)
 	UpdateTierDescription(ctx context.Context, id, description string) error
 	SetTierFeatures(ctx context.Context, tierID string, features []*TierFeature) error
+	DeleteTier(ctx context.Context, id string) error
 	TierFeaturesByTier(ctx context.Context) (map[string][]*TierFeature, error)
 
 	CreateKey(ctx context.Context, key *Key, secrets []*KeySecret) error

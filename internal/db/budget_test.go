@@ -106,3 +106,38 @@ func TestABudgetChangeKeepsSpendUnlessTheUnitChanges(t *testing.T) {
 		t.Fatalf("missing key: %v", err)
 	}
 }
+
+func TestATierIsDeletedWithItsFeaturesAndScopesOnlyWhenNoKeyUsesIt(t *testing.T) {
+	a := freshDB(t)
+	ctx := context.Background()
+	for _, id := range []string{"empty", "used"} {
+		if err := a.CreateTier(ctx, &Tier{ID: id, Name: id}, []*TierFeature{{TierID: id, Feature: id + "_f", RateLimit: 1, WindowSeconds: 60}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.CreateConsumer(ctx, &Consumer{ID: "c", Name: "c", TokenHash: "h", IsActive: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddConsumerScope(ctx, "c", "empty"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CreateKey(ctx, &Key{ID: "k", Name: "k", KeyValue: "v", TierID: "used", IsActive: true, Metadata: map[string]any{}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		id  string
+		err error
+	}{
+		{"used", ErrTierInUse},
+		{"empty", nil},
+		{"empty", ErrTierNotFound},
+	}
+	for _, c := range cases {
+		if err := a.DeleteTier(ctx, c.id); !errors.Is(err, c.err) {
+			t.Fatalf("delete %s: %v, want %v", c.id, err, c.err)
+		}
+	}
+	if scopes, _ := a.GetConsumerScopes(ctx, "c"); len(scopes) != 0 {
+		t.Fatalf("scopes left %v", scopes)
+	}
+}
