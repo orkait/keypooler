@@ -6,17 +6,23 @@ import (
 	"strings"
 )
 
+const (
+	LogFormatJSON   = "json"
+	LogFormatPretty = "pretty"
+	defaultLogLevel = "info"
+)
+
 var (
 	ValidLogLevels = map[string]bool{
-		"debug": true,
-		"info":  true,
-		"warn":  true,
-		"error": true,
+		"debug":         true,
+		defaultLogLevel: true,
+		"warn":          true,
+		"error":         true,
 	}
 
 	ValidLogFormats = map[string]bool{
-		"json":   true,
-		"pretty": true,
+		LogFormatJSON:   true,
+		LogFormatPretty: true,
 	}
 )
 
