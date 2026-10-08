@@ -109,6 +109,25 @@ func (a *PostgresAdapter) GetConsumerScopes(ctx context.Context, consumerID stri
 	return tierIDs, rows.Err()
 }
 
+// ConsumerScopesByConsumer reads every consumer's granted tiers in one query.
+func (a *PostgresAdapter) ConsumerScopesByConsumer(ctx context.Context) (map[string][]string, error) {
+	rows, err := a.pool.Query(ctx, "SELECT consumer_id, tier_id FROM consumer_scopes ORDER BY consumer_id, tier_id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byConsumer := map[string][]string{}
+	for rows.Next() {
+		var consumerID, tierID string
+		if err := rows.Scan(&consumerID, &tierID); err != nil {
+			return nil, err
+		}
+		byConsumer[consumerID] = append(byConsumer[consumerID], tierID)
+	}
+	return byConsumer, rows.Err()
+}
+
 // --- Usage Events ---
 
 // RecordUsageEvents writes a batch of serves in one COPY. An event with no

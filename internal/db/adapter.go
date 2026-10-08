@@ -21,7 +21,7 @@ type DBAdapter interface {
 
 	// Tier Features
 	SetTierFeatures(ctx context.Context, tierID string, features []*TierFeature) error
-	GetTierFeatures(ctx context.Context, tierID string) ([]*TierFeature, error)
+	TierFeaturesByTier(ctx context.Context) (map[string][]*TierFeature, error)
 
 	// Keys
 	CreateKey(ctx context.Context, key *Key) error
@@ -39,7 +39,7 @@ type DBAdapter interface {
 	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
 
 	// Key Secrets
-	GetKeySecrets(ctx context.Context, keyID string) ([]*KeySecret, error)
+	KeySecretsByKey(ctx context.Context) (map[string][]*KeySecret, error)
 	SetKeySecrets(ctx context.Context, keyID string, secrets []*KeySecret) error
 
 	// Consumers
@@ -49,6 +49,7 @@ type DBAdapter interface {
 	DeleteConsumer(ctx context.Context, id string) error
 	AddConsumerScope(ctx context.Context, consumerID, tierID string) error
 	GetConsumerScopes(ctx context.Context, consumerID string) ([]string, error)
+	ConsumerScopesByConsumer(ctx context.Context) (map[string][]string, error)
 
 	// Usage Events (audit)
 	RecordUsageEvents(ctx context.Context, events []*UsageEvent) error

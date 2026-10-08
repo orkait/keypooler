@@ -96,14 +96,15 @@ func (s *Server) ListConsumers(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tiers {
 		tierName[t.ID] = t.Name
 	}
+	byConsumer, err := s.DB.ConsumerScopesByConsumer(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
 
 	result := make([]map[string]any, len(consumers))
 	for i, c := range consumers {
-		scopeIDs, serr := s.DB.GetConsumerScopes(ctx, c.ID)
-		if serr != nil {
-			writeError(w, http.StatusInternalServerError, "database error")
-			return
-		}
+		scopeIDs := byConsumer[c.ID]
 		scopes := make([]string, 0, len(scopeIDs))
 		for _, id := range scopeIDs {
 			if name, ok := tierName[id]; ok {

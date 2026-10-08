@@ -13,12 +13,20 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Store is what the pool reads from and writes to the database.
+type Store interface {
+	GetAllKeys(ctx context.Context) ([]*db.Key, error)
+	TierFeaturesByTier(ctx context.Context) (map[string][]*db.TierFeature, error)
+	KeySecretsByKey(ctx context.Context) (map[string][]*db.KeySecret, error)
+	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
+}
+
 // Manager owns all pool keys and selects them via round-robin.
 type Manager struct {
 	mu     sync.RWMutex
 	keys   []*PoolKey
 	rr     *RoundRobin
-	dbAdap db.DBAdapter
+	dbAdap Store
 	usage  *writeback.Writer
 	sealer *crypto.Sealer
 	logger zerolog.Logger
@@ -27,7 +35,7 @@ type Manager struct {
 // NewManager creates a key pool manager and loads keys from the database. The
 // sealer opens (decrypts where tagged) bound secrets as keys are loaded; usage
 // writes go through the writeback writer, off the serve path.
-func NewManager(dbAdap db.DBAdapter, sealer *crypto.Sealer, usage *writeback.Writer, logger zerolog.Logger) (*Manager, error) {
+func NewManager(dbAdap Store, sealer *crypto.Sealer, usage *writeback.Writer, logger zerolog.Logger) (*Manager, error) {
 	m := &Manager{
 		rr:     NewRoundRobin(),
 		dbAdap: dbAdap,
@@ -125,27 +133,27 @@ func (m *Manager) ReloadKeys() error {
 	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
 	defer cancel()
 
+	// Three reads however many keys there are: keys, every tier's features, every
+	// key's secrets.
 	dbKeys, err := m.dbAdap.GetAllKeys(ctx)
 	if err != nil {
 		return err
 	}
-
-	// Load tier features (rate + window) per tier, once.
-	tierFeatures := make(map[string]map[string]FeatureLimit) // tierID -> feature -> limit
-	for _, k := range dbKeys {
-		if _, ok := tierFeatures[k.TierID]; ok {
-			continue
-		}
-		features, err := m.dbAdap.GetTierFeatures(ctx, k.TierID)
-		if err != nil {
-			m.logger.Error().Err(err).Str("tier_id", k.TierID).Msg("failed to load tier features")
-			continue
-		}
+	byTier, err := m.dbAdap.TierFeaturesByTier(ctx)
+	if err != nil {
+		return err
+	}
+	byKey, err := m.dbAdap.KeySecretsByKey(ctx)
+	if err != nil {
+		return err
+	}
+	tierFeatures := make(map[string]map[string]FeatureLimit, len(byTier)) // tierID -> feature -> limit
+	for tierID, features := range byTier {
 		fm := make(map[string]FeatureLimit, len(features))
 		for _, f := range features {
 			fm[f.Feature] = FeatureLimit{RateLimit: f.RateLimit, WindowSeconds: f.WindowSeconds}
 		}
-		tierFeatures[k.TierID] = fm
+		tierFeatures[tierID] = fm
 	}
 
 	m.mu.Lock()
@@ -165,7 +173,7 @@ func (m *Manager) ReloadKeys() error {
 			continue
 		}
 
-		secrets := m.loadSecrets(ctx, k.ID)
+		secrets := m.openSecrets(k.ID, byKey[k.ID])
 
 		if old, ok := existing[k.ID]; ok {
 			// Preserve runtime rate state, refresh DB-backed fields.
@@ -208,15 +216,10 @@ func (m *Manager) ReloadKeys() error {
 	return nil
 }
 
-// loadSecrets loads a key's bound secrets and opens each via the sealer (values
-// tagged as encrypted are decrypted, plaintext values pass through) into a
-// name->value map. Open failures are logged without the value and skipped.
-func (m *Manager) loadSecrets(ctx context.Context, keyID string) map[string]string {
-	rows, err := m.dbAdap.GetKeySecrets(ctx, keyID)
-	if err != nil {
-		m.logger.Error().Err(err).Str("key_id", keyID).Msg("failed to load key secrets")
-		return nil
-	}
+// openSecrets opens a key's bound secrets via the sealer (values tagged as
+// encrypted are decrypted, plaintext values pass through) into a name->value map.
+// Open failures are logged without the value and skipped.
+func (m *Manager) openSecrets(keyID string, rows []*db.KeySecret) map[string]string {
 	if len(rows) == 0 {
 		return nil
 	}

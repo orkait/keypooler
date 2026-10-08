@@ -47,13 +47,20 @@ func TestMigrationsRunTwiceWithoutError(t *testing.T) {
 func TestTiersAndFeaturesRoundTrip(t *testing.T) {
 	a, ctx := freshDB(t), context.Background()
 	seedTier(t, a, "groq_chat")
+	seedTier(t, a, "tavily")
 
-	if err := a.SetTierFeatures(ctx, "groq_chat", []*TierFeature{{Feature: "chat", RateLimit: 30, WindowSeconds: 60}, {Feature: "embed", RateLimit: 5, WindowSeconds: 3600}}); err != nil {
+	if err := a.SetTierFeatures(ctx, "groq_chat", []*TierFeature{{Feature: "embed", RateLimit: 5, WindowSeconds: 3600}, {Feature: "chat", RateLimit: 30, WindowSeconds: 60}}); err != nil {
 		t.Fatal(err)
 	}
-	features, err := a.GetTierFeatures(ctx, "groq_chat")
-	if err != nil || len(features) != 2 || features[0].WindowSeconds != 60 || features[1].WindowSeconds != 3600 {
-		t.Fatalf("features %+v err %v", features, err)
+	if err := a.SetTierFeatures(ctx, "tavily", []*TierFeature{{Feature: "search", RateLimit: 1, WindowSeconds: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	byTier, err := a.TierFeaturesByTier(ctx)
+	if err != nil || len(byTier) != 2 || len(byTier["tavily"]) != 1 {
+		t.Fatalf("by tier %+v err %v", byTier, err)
+	}
+	if chat := byTier["groq_chat"]; len(chat) != 2 || chat[0].Feature != "chat" || chat[1].WindowSeconds != 3600 {
+		t.Fatalf("groq_chat features, ordered by name: %+v", chat)
 	}
 	if err := a.UpdateTierDescription(ctx, "groq_chat", "free tier"); err != nil {
 		t.Fatal(err)
@@ -137,14 +144,14 @@ func TestSecretsAreReplacedWholeAndGoWithTheirKey(t *testing.T) {
 	if err := a.SetKeySecrets(ctx, "k", []*KeySecret{{Name: "c", Value: "3"}}); err != nil {
 		t.Fatal(err)
 	}
-	secrets, err := a.GetKeySecrets(ctx, "k")
-	if err != nil || len(secrets) != 1 || secrets[0].Name != "c" {
-		t.Fatalf("secrets %+v err %v", secrets, err)
+	byKey, err := a.KeySecretsByKey(ctx)
+	if err != nil || len(byKey["k"]) != 1 || byKey["k"][0].Name != "c" {
+		t.Fatalf("secrets %+v err %v", byKey, err)
 	}
 	if err := a.DeleteKey(ctx, "k"); err != nil {
 		t.Fatal(err)
 	}
-	if left, _ := a.GetKeySecrets(ctx, "k"); len(left) != 0 {
+	if left, _ := a.KeySecretsByKey(ctx); len(left) != 0 {
 		t.Fatalf("orphan secrets %+v", left)
 	}
 }
@@ -166,6 +173,9 @@ func TestConsumersScopesAreIdempotentAndInactiveNeverAuthenticates(t *testing.T)
 	scopes, err := a.GetConsumerScopes(ctx, "c1")
 	if err != nil || len(scopes) != 1 {
 		t.Fatalf("scopes %v err %v", scopes, err)
+	}
+	if all, err := a.ConsumerScopesByConsumer(ctx); err != nil || len(all) != 1 || len(all["c1"]) != 1 || all["c1"][0] != "t" {
+		t.Fatalf("all scopes %v err %v", all, err)
 	}
 	if c, err := a.GetConsumerByTokenHash(ctx, "h1"); err != nil || c == nil || c.Name != "ai-gateway" {
 		t.Fatalf("active %+v err %v", c, err)

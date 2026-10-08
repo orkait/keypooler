@@ -124,25 +124,26 @@ func (a *PostgresAdapter) SetTierFeatures(ctx context.Context, tierID string, fe
 	return tx.Commit(ctx)
 }
 
-func (a *PostgresAdapter) GetTierFeatures(ctx context.Context, tierID string) ([]*TierFeature, error) {
+// TierFeaturesByTier reads every tier's features in one query, each tier's in
+// feature-name order.
+func (a *PostgresAdapter) TierFeaturesByTier(ctx context.Context) (map[string][]*TierFeature, error) {
 	rows, err := a.pool.Query(ctx,
-		"SELECT tier_id, feature, rate_limit, window_seconds FROM tier_features WHERE tier_id = $1 ORDER BY feature",
-		tierID,
+		"SELECT tier_id, feature, rate_limit, window_seconds FROM tier_features ORDER BY tier_id, feature",
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var features []*TierFeature
+	byTier := map[string][]*TierFeature{}
 	for rows.Next() {
 		var f TierFeature
 		if err := rows.Scan(&f.TierID, &f.Feature, &f.RateLimit, &f.WindowSeconds); err != nil {
 			return nil, err
 		}
-		features = append(features, &f)
+		byTier[f.TierID] = append(byTier[f.TierID], &f)
 	}
-	return features, rows.Err()
+	return byTier, rows.Err()
 }
 
 // --- Keys ---
@@ -280,25 +281,23 @@ func (a *PostgresAdapter) SetKeyExhausted(ctx context.Context, keyID string, unt
 
 // --- Key Secrets ---
 
-func (a *PostgresAdapter) GetKeySecrets(ctx context.Context, keyID string) ([]*KeySecret, error) {
-	rows, err := a.pool.Query(ctx,
-		"SELECT key_id, name, value FROM key_secrets WHERE key_id = $1 ORDER BY name",
-		keyID,
-	)
+// KeySecretsByKey reads every key's bound secrets in one query.
+func (a *PostgresAdapter) KeySecretsByKey(ctx context.Context) (map[string][]*KeySecret, error) {
+	rows, err := a.pool.Query(ctx, "SELECT key_id, name, value FROM key_secrets ORDER BY key_id, name")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var secrets []*KeySecret
+	byKey := map[string][]*KeySecret{}
 	for rows.Next() {
 		var s KeySecret
 		if err := rows.Scan(&s.KeyID, &s.Name, &s.Value); err != nil {
 			return nil, err
 		}
-		secrets = append(secrets, &s)
+		byKey[s.KeyID] = append(byKey[s.KeyID], &s)
 	}
-	return secrets, rows.Err()
+	return byKey, rows.Err()
 }
 
 // SetKeySecrets replaces all secrets for a key inside a single transaction.

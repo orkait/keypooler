@@ -160,10 +160,15 @@ func (s *Server) ListTiers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database error")
 		return
 	}
+	byTier, err := s.DB.TierFeaturesByTier(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
 
 	result := make([]map[string]any, len(tiers))
 	for i, t := range tiers {
-		features, _ := s.DB.GetTierFeatures(ctx, t.ID)
+		features := byTier[t.ID]
 		limits := make(map[string]featureLimitBody, len(features))
 		for _, f := range features {
 			limits[f.Feature] = featureLimitBody{RateLimit: f.RateLimit, WindowSeconds: f.WindowSeconds}
