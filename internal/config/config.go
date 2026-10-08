@@ -43,9 +43,11 @@ func Load() (*Config, error) {
 		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
 		AdminToken:    getEnv("ADMIN_TOKEN", ""),
 
-		LogLevel:    getEnv("LOG_LEVEL", "info"),
-		LogFormat:   getEnv("LOG_FORMAT", "json"),
-		LogRequests: getEnvAsBool("LOG_REQUESTS", true),
+		LogLevel:  getEnv("LOG_LEVEL", "info"),
+		LogFormat: getEnv("LOG_FORMAT", "json"),
+		// Off by default: every serve is already a usage_events row, and a line per
+		// draw is the bulk of the service's log volume.
+		LogRequests: getEnvAsBool("LOG_REQUESTS", false),
 	}
 
 	if err := cfg.validate(); err != nil {

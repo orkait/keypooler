@@ -177,7 +177,8 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 | `DB_MAX_OPEN_CONNS` | `4` | pool size; the serve path uses none, so admin and flushes are all it serves |
 | `SERVER_PORT` | `8080` | listen port |
 | `SERVER_{READ,WRITE,IDLE,SHUTDOWN}_TIMEOUT_SECONDS` | `30/30/120/30` | HTTP server timeouts |
-| `LOG_LEVEL` `LOG_FORMAT` `LOG_REQUESTS` | `info` `json` `true` | logging |
+| `LOG_LEVEL` `LOG_FORMAT` | `info` `json` | logging |
+| `LOG_REQUESTS` | `false` | a log line per request; every serve is already a `usage_events` row |
 </details>
 
 ## 🗂️ Project structure

@@ -33,5 +33,8 @@ func NewRouter(srv *Server) http.Handler {
 	mux.Handle("POST /admin/consumers/{id}/scopes", admin(srv.AddConsumerScope))
 	mux.Handle("GET /admin/usage", admin(srv.ListUsageEvents))
 
+	if !srv.Cfg.LogRequests {
+		return mux
+	}
 	return RequestLogger(srv.Logger)(mux)
 }

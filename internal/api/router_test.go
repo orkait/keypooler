@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +53,21 @@ func TestEveryAdminRouteWantsTheAdminToken(t *testing.T) {
 			if got := status(h, route.method, route.path, token); got != http.StatusUnauthorized {
 				t.Errorf("%s %s with token %q answered %d, want 401", route.method, route.path, token, got)
 			}
+		}
+	}
+}
+
+func TestRequestsAreLoggedOnlyWhenAskedFor(t *testing.T) {
+	for _, logRequests := range []bool{false, true} {
+		var logged bytes.Buffer
+		h := NewRouter(&Server{
+			Cfg:    &config.Config{AdminToken: adminToken, LogRequests: logRequests},
+			Auth:   NewAuthCache(time.Minute),
+			Logger: zerolog.New(&logged),
+		})
+		status(h, http.MethodGet, "/health", "")
+		if got := strings.Contains(logged.String(), "/health"); got != logRequests {
+			t.Errorf("LogRequests=%v: logged %q", logRequests, logged.String())
 		}
 	}
 }
