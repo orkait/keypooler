@@ -158,10 +158,10 @@ func (m *Manager) ReloadKeys() error {
 			continue
 		}
 
-		// A key already in the pool keeps its object, and with it its rate counters.
+		// A key already in the pool keeps its object, and with it its runtime state.
 		key, ok := existing[k.ID]
 		if !ok {
-			key = &PoolKey{}
+			key = &PoolKey{UsageCount: k.UsageCount, UsageWindowStart: k.UsageWindowStart}
 		}
 		key.load(k, features, m.openSecrets(k.ID, byKey[k.ID]))
 		newKeys = append(newKeys, key)

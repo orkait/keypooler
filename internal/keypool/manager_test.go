@@ -85,6 +85,35 @@ func TestAReloadRefreshesAKeysFieldsAndKeepsItsRateWindow(t *testing.T) {
 	}
 }
 
+func TestAReloadKeepsServesTheDatabaseHasNotSeenYet(t *testing.T) {
+	window := 3600
+	for name, windowSeconds := range map[string]*int{"lifetime": nil, "windowed": &window} {
+		t.Run(name, func(t *testing.T) {
+			limit := 2
+			store := &fakeStore{
+				keys:     []*db.Key{{ID: "k", TierID: "t", IsActive: true, UsageLimit: &limit, UsageWindowSeconds: windowSeconds}},
+				features: map[string][]*db.TierFeature{"t": {{TierID: "t", Feature: "chat", RateLimit: 10, WindowSeconds: 60}}},
+			}
+			m := &Manager{rr: NewRoundRobin(), dbAdap: store, usage: writeback.New(store, zerolog.Nop()), logger: zerolog.Nop()}
+			if err := m.ReloadKeys(); err != nil {
+				t.Fatal(err)
+			}
+			if m.GetKeyForFeature("chat", nil) == nil {
+				t.Fatal("first serve refused")
+			}
+			if err := m.ReloadKeys(); err != nil {
+				t.Fatal(err)
+			}
+			if m.GetKeyForFeature("chat", nil) == nil {
+				t.Fatal("second serve refused")
+			}
+			if m.GetKeyForFeature("chat", nil) != nil {
+				t.Fatal("the reload forgot an unflushed serve: the key served past its limit")
+			}
+		})
+	}
+}
+
 func TestAReloadReadsKeysFeaturesAndSecretsOnceHoweverManyKeys(t *testing.T) {
 	store := &fakeStore{features: map[string][]*db.TierFeature{
 		"served": {{TierID: "served", Feature: "chat", RateLimit: 10, WindowSeconds: 60}},

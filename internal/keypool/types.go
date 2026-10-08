@@ -45,8 +45,9 @@ type PoolKey struct {
 	rateCounters map[string]*rateCounter // feature -> counter
 }
 
-// load sets every field the database owns. Runtime state (the rate counters) is
-// left as it is, so a reload refreshes a key without resetting its windows.
+// load sets the fields an admin can change. Runtime state is left as it is: the
+// rate counters, and the usage count and window, which run ahead of the database
+// by whatever writeback has not flushed yet.
 func (k *PoolKey) load(row *db.Key, features map[string]FeatureLimit, secrets map[string]string) {
 	k.ID = row.ID
 	k.Name = row.Name
@@ -55,9 +56,7 @@ func (k *PoolKey) load(row *db.Key, features map[string]FeatureLimit, secrets ma
 	k.IsActive = row.IsActive
 	k.ExpiresAt = row.ExpiresAt
 	k.UsageLimit = row.UsageLimit
-	k.UsageCount = row.UsageCount
 	k.UsageWindowSeconds = row.UsageWindowSeconds
-	k.UsageWindowStart = row.UsageWindowStart
 	k.ExhaustedUntil = row.ExhaustedUntil
 	k.Metadata = row.Metadata
 	k.Secrets = secrets
