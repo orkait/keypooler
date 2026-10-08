@@ -13,7 +13,7 @@
 
 </div>
 
-Other services (e.g. the siphon runner) call keypooler to obtain a usable key for a feature. They never store, rotate, or decrypt credentials themselves.
+Other services call keypooler to obtain a usable key for a feature. They never store, rotate, or decrypt credentials themselves.
 
 ```
 caller  ──►  GET /key?feature=firecrawl_scrape  ──►  keypooler picks a key  ──►  { value, secrets, metadata }
@@ -137,7 +137,7 @@ curl -X POST localhost:8080/admin/keys -H "$A" -H 'Content-Type: application/jso
 
 # 3. create a consumer and scope it to the tier (token is shown ONCE)
 CID=$(curl -s -X POST localhost:8080/admin/consumers -H "$A" -H 'Content-Type: application/json' \
-  -d '{"name":"siphon-runner","description":"firecrawl via rotation"}' | jq -r .id)
+  -d '{"name":"my-service","description":"firecrawl via rotation"}' | jq -r .id)
 curl -X POST localhost:8080/admin/consumers/$CID/scopes -H "$A" -H 'Content-Type: application/json' \
   -d '{"tier":"firecrawl"}'
 
