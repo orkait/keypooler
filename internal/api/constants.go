@@ -10,6 +10,8 @@ const (
 	exhaustedEvent = "exhausted"
 	// adminConsumerID is the consumer recorded for a key drawn with the admin token.
 	adminConsumerID = "admin"
+	// consumerTokenBytes is the randomness in a consumer token: 64 hex characters.
+	consumerTokenBytes = 32
 
 	authorizationHeader = "Authorization"
 	bearerScheme        = "Bearer"

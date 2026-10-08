@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/orkait/keypooler/internal/db"
@@ -73,21 +74,14 @@ func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	existing, err := s.DB.GetTierByName(ctx, body.Name)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
-		return
-	}
-	if existing != nil {
-		writeError(w, http.StatusConflict, "tier already exists: "+body.Name)
-		return
-	}
-
 	tier := &db.Tier{ID: uuid.New().String(), Name: body.Name}
 	if body.Description != nil {
 		tier.Description = *body.Description
 	}
-	if err := s.DB.CreateTier(ctx, tier); err != nil {
+	if err := s.DB.CreateTier(ctx, tier); errors.Is(err, db.ErrDuplicate) {
+		writeError(w, http.StatusConflict, "tier already exists: "+body.Name)
+		return
+	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create tier")
 		return
 	}

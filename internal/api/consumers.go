@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"time"
 
@@ -11,9 +12,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// generateConsumerToken returns a 32-byte random token, hex-encoded (64 chars).
+// generateConsumerToken returns a random token, hex-encoded.
 func generateConsumerToken() (string, error) {
-	buf := make([]byte, 32)
+	buf := make([]byte, consumerTokenBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
@@ -51,14 +52,14 @@ func (s *Server) CreateConsumer(w http.ResponseWriter, r *http.Request) {
 		IsActive:    true,
 	}
 
-	ctx := r.Context()
-	if err := s.DB.CreateConsumer(ctx, consumer); err != nil {
-		// UNIQUE(name) violation surfaces here.
-		writeError(w, http.StatusConflict, "failed to create consumer (name may already exist)")
+	if err := s.DB.CreateConsumer(r.Context(), consumer); errors.Is(err, db.ErrDuplicate) {
+		writeError(w, http.StatusConflict, "consumer already exists: "+body.Name)
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create consumer")
 		return
 	}
 
-	// token is returned exactly once; the hash never leaves the DB.
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":    consumer.ID,
 		"name":  consumer.Name,

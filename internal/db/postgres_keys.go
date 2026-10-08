@@ -17,7 +17,7 @@ func (a *PostgresAdapter) CreateTier(ctx context.Context, tier *Tier) error {
 		"INSERT INTO tiers (id, name, description) VALUES ($1, $2, $3)",
 		tier.ID, tier.Name, tier.Description,
 	)
-	return err
+	return duplicate(err)
 }
 
 func (a *PostgresAdapter) GetTier(ctx context.Context, id string) (*Tier, error) {

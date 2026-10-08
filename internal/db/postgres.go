@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -15,7 +16,11 @@ const (
 	minConns        = 1
 	maxConnIdleTime = 5 * time.Minute
 	connectTimeout  = 10 * time.Second
+	uniqueViolation = "23505"
 )
+
+// ErrDuplicate is a write that collides with a row already holding a unique value.
+var ErrDuplicate = errors.New("already exists")
 
 // PostgresAdapter implements DBAdapter on a native pgx pool: the binary protocol and
 // a per-connection prepared-statement cache, so a repeated query is one round trip.
@@ -65,6 +70,15 @@ func (a *PostgresAdapter) Close() error {
 func notFound(err error, what string) error {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%s not found", what)
+	}
+	return err
+}
+
+// duplicate reports a unique violation as ErrDuplicate.
+func duplicate(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+		return ErrDuplicate
 	}
 	return err
 }

@@ -16,7 +16,7 @@ func (a *PostgresAdapter) CreateConsumer(ctx context.Context, consumer *Consumer
 		"INSERT INTO consumers (id, name, token_hash, description, is_active) VALUES ($1, $2, $3, $4, $5)",
 		consumer.ID, consumer.Name, consumer.TokenHash, consumer.Description, consumer.IsActive,
 	)
-	return err
+	return duplicate(err)
 }
 
 const consumerColumns = "id, name, token_hash, description, is_active, created_at"

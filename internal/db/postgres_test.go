@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -77,6 +78,29 @@ func TestTiersAndFeaturesRoundTrip(t *testing.T) {
 	}
 	if err := a.DeleteTier(ctx, "groq_chat"); err == nil {
 		t.Fatal("deleting a deleted tier must fail")
+	}
+}
+
+func TestATakenNameIsADuplicate(t *testing.T) {
+	cases := map[string]func(*PostgresAdapter) error{
+		"tier": func(a *PostgresAdapter) error {
+			return a.CreateTier(context.Background(), &Tier{ID: "t2", Name: "t"})
+		},
+		"consumer": func(a *PostgresAdapter) error {
+			return a.CreateConsumer(context.Background(), &Consumer{ID: "c2", Name: "c", TokenHash: "h2"})
+		},
+	}
+	for name, create := range cases {
+		t.Run(name, func(t *testing.T) {
+			a := freshDB(t)
+			seedTier(t, a, "t")
+			if err := a.CreateConsumer(context.Background(), &Consumer{ID: "c", Name: "c", TokenHash: "h"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := create(a); !errors.Is(err, ErrDuplicate) {
+				t.Fatalf("err %v, want ErrDuplicate", err)
+			}
+		})
 	}
 }
 
