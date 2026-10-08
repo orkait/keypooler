@@ -174,11 +174,8 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 | `ADMIN_TOKEN` | *(required)* | superuser bearer token |
 | `ENCRYPTION_KEY` | *(empty = plaintext)* | 32-byte hex; when set, new writes are encrypted |
 | `DATABASE_URL` | *(required)* | `postgres://user:pass@host:5432/db` |
-| `DB_MAX_OPEN_CONNS` | `4` | pool size; the serve path uses none, so admin and flushes are all it serves |
-| `SERVER_PORT` | `8080` | listen port |
-| `SERVER_{READ,WRITE,IDLE,SHUTDOWN}_TIMEOUT_SECONDS` | `30/30/120/30` | HTTP server timeouts |
-| `LOG_LEVEL` `LOG_FORMAT` | `info` `json` | logging |
-| `LOG_REQUESTS` | `false` | a log line per request; every serve is already a `usage_events` row |
+
+Everything else is a constant in `internal/config`: listen on `:8080`, 4 database connections (the serve path uses none), HTTP timeouts 30/30/120 s and a 30 s shutdown, JSON logs at info.
 </details>
 
 ## 🗂️ Project structure

@@ -33,8 +33,8 @@ func tierFeatures(tierID string, requested map[string]featureLimitBody) ([]*db.T
 	return stored, echoed
 }
 
-func tierResponse(tier *db.Tier, features map[string]featureLimitBody) map[string]any {
-	return map[string]any{"id": tier.ID, "name": tier.Name, "description": tier.Description, "features": features}
+func tierResponse(tier *db.Tier, features map[string]featureLimitBody) tierView {
+	return tierView{ID: tier.ID, Name: tier.Name, Description: tier.Description, Features: features}
 }
 
 func decodeTierBody(w http.ResponseWriter, r *http.Request) (tierBody, bool) {
@@ -113,7 +113,7 @@ func (s *Server) ListTiers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database error")
 		return
 	}
-	result := make([]map[string]any, len(tiers))
+	result := make([]tierView, len(tiers))
 	for i, t := range tiers {
 		limits := make(map[string]featureLimitBody, len(byTier[t.ID]))
 		for _, f := range byTier[t.ID] {

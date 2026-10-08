@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/rs/zerolog"
 )
@@ -40,13 +39,13 @@ func TestACreateIsAConflictOnlyWhenTheNameIsTaken(t *testing.T) {
 		for name, f := range failures {
 			t.Run(path+"/"+name, func(t *testing.T) {
 				h := NewRouter(&Server{
-					DB:     failingCreates{err: f.err},
-					Cfg:    &config.Config{AdminToken: adminToken},
-					Auth:   NewAuthCache(time.Minute),
-					Logger: zerolog.Nop(),
+					DB:         failingCreates{err: f.err},
+					AdminToken: adminToken,
+					Auth:       NewAuthCache(time.Minute),
+					Logger:     zerolog.Nop(),
 				})
 				r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-				r.Header.Set("Authorization", "Bearer "+adminToken)
+				r.Header.Set(headerAuthorization, bearer(adminToken))
 				w := httptest.NewRecorder()
 				h.ServeHTTP(w, r)
 				if w.Code != f.status {

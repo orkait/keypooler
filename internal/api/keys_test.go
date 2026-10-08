@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/keypool"
@@ -55,10 +54,10 @@ func addKey(t *testing.T, body string) (*keyStore, *httptest.ResponseRecorder) {
 	}
 	h := NewRouter(&Server{
 		DB: store, Pool: pool, Sealer: sealer, Logger: zerolog.Nop(),
-		Cfg: &config.Config{AdminToken: adminToken}, Auth: NewAuthCache(time.Minute),
+		AdminToken: adminToken, Auth: NewAuthCache(time.Minute),
 	})
 	r := httptest.NewRequest(http.MethodPost, "/admin/keys", strings.NewReader(body))
-	r.Header.Set("Authorization", "Bearer "+adminToken)
+	r.Header.Set(headerAuthorization, bearer(adminToken))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return store, w
@@ -110,7 +109,7 @@ func TestAScopedConsumerIsForbiddenOutOfScopeAndThrottledWhenSpent(t *testing.T)
 	s.DB, s.Pool, s.Sealer = store, pool, sealer
 	for feature, want := range map[string]int{"spent": http.StatusTooManyRequests, "elsewhere": http.StatusForbidden} {
 		r := httptest.NewRequest(http.MethodGet, "/key?feature="+feature, nil)
-		r.Header.Set("Authorization", "Bearer "+consumerToken)
+		r.Header.Set(headerAuthorization, bearer(consumerToken))
 		w := httptest.NewRecorder()
 		NewRouter(s).ServeHTTP(w, r)
 		if w.Code != want {

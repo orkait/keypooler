@@ -99,8 +99,7 @@ func executeMigration(ctx context.Context, pool *pgxpool.Pool, m migration) erro
 	}
 	defer tx.Rollback(ctx)
 
-	// The simple protocol takes a file of several statements as one.
-	if _, err := tx.Conn().PgConn().Exec(ctx, m.sql).ReadAll(); err != nil {
+	if err := execScript(ctx, tx, m.sql); err != nil {
 		return fmt.Errorf("failed to execute SQL: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
@@ -110,4 +109,9 @@ func executeMigration(ctx context.Context, pool *pgxpool.Pool, m migration) erro
 		return fmt.Errorf("failed to record migration: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+func execScript(ctx context.Context, tx pgx.Tx, script string) error {
+	_, err := tx.Conn().PgConn().Exec(ctx, script).ReadAll()
+	return err
 }

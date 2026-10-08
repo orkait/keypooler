@@ -16,7 +16,7 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	feature := r.URL.Query().Get("feature")
+	feature := r.URL.Query().Get(featureParam)
 	if feature == "" {
 		writeError(w, http.StatusBadRequest, "feature query param required")
 		return
@@ -37,12 +37,7 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Usage.Event(db.NewUsageEvent(key.ID, caller.consumerID, feature))
-	writeJSON(w, http.StatusOK, map[string]any{
-		"key_id":   key.ID,
-		"value":    value,
-		"metadata": key.Metadata,
-		"secrets":  key.Secrets,
-	})
+	writeJSON(w, http.StatusOK, drawnKey{KeyID: key.ID, Value: value, Metadata: key.Metadata, Secrets: key.Secrets})
 }
 
 type addKeyBody struct {
@@ -132,20 +127,19 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.reload("adding key")
-
-	secretNames := make([]string, 0, len(secrets))
+	names := make([]string, 0, len(secrets))
 	for _, sec := range secrets {
-		secretNames = append(secretNames, sec.Name)
+		names = append(names, sec.Name)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":                   key.ID,
-		"name":                 key.Name,
-		"tier":                 body.Tier,
-		"expires_at":           body.ExpiresAt,
-		"usage_limit":          body.UsageLimit,
-		"usage_window_seconds": body.UsageWindowSeconds,
-		"metadata":             key.Metadata,
-		"secret_names":         secretNames,
+	writeJSON(w, http.StatusCreated, addedKey{
+		ID:                 key.ID,
+		Name:               key.Name,
+		Tier:               body.Tier,
+		ExpiresAt:          body.ExpiresAt,
+		UsageLimit:         body.UsageLimit,
+		UsageWindowSeconds: body.UsageWindowSeconds,
+		Metadata:           key.Metadata,
+		SecretNames:        names,
 	})
 }
 
@@ -157,27 +151,27 @@ func (s *Server) reload(after string) {
 
 func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 	statuses := s.Pool.GetHealthStatus()
-	result := make([]map[string]any, len(statuses))
+	listed := make([]listedKey, len(statuses))
 	for i, ks := range statuses {
-		usage := make(map[string]any, len(ks.Usage))
+		usage := make(map[string]rateUsage, len(ks.Usage))
 		for feature, info := range ks.Usage {
-			usage[feature] = map[string]any{"used": info.Used, "limit": info.Limit, "window_seconds": info.WindowSeconds}
+			usage[feature] = rateUsage{Used: info.Used, Limit: info.Limit, WindowSeconds: info.WindowSeconds}
 		}
-		result[i] = map[string]any{
-			"id":              ks.ID,
-			"name":            ks.Name,
-			"tier_id":         ks.TierID,
-			"is_active":       ks.IsActive,
-			"expires_at":      rfc3339OrNil(ks.ExpiresAt),
-			"exhausted_until": rfc3339OrNil(ks.ExhaustedUntil),
-			"usage_limit":     ks.UsageLimit,
-			"usage_count":     ks.UsageCount,
-			"metadata":        ks.Metadata,
-			"secret_names":    ks.SecretNames,
-			"usage":           usage,
+		listed[i] = listedKey{
+			ID:             ks.ID,
+			Name:           ks.Name,
+			TierID:         ks.TierID,
+			IsActive:       ks.IsActive,
+			ExpiresAt:      rfc3339OrNil(ks.ExpiresAt),
+			ExhaustedUntil: rfc3339OrNil(ks.ExhaustedUntil),
+			UsageLimit:     ks.UsageLimit,
+			UsageCount:     ks.UsageCount,
+			Metadata:       ks.Metadata,
+			SecretNames:    ks.SecretNames,
+			Usage:          usage,
 		}
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, listed)
 }
 
 func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
@@ -209,10 +203,7 @@ func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Pool.MarkExhausted(id, until)
 	s.Usage.Event(db.NewUsageEvent(id, caller.consumerID, exhaustedEvent))
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status": "exhausted",
-		"until":  until.UTC().Format(time.RFC3339),
-	})
+	writeJSON(w, http.StatusOK, exhaustedKey{Status: statusExhausted, Until: rfc3339(until)})
 }
 
 func (s *Server) DeleteKey(w http.ResponseWriter, r *http.Request) {
@@ -221,12 +212,5 @@ func (s *Server) DeleteKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.reload("deleting key")
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-func rfc3339OrNil(t *time.Time) any {
-	if t == nil {
-		return nil
-	}
-	return t.UTC().Format(time.RFC3339)
+	writeJSON(w, http.StatusOK, statusBody{Status: statusDeleted})
 }

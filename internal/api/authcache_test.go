@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/rs/zerolog"
 )
@@ -39,17 +38,17 @@ const consumerToken = "consumer-token"
 
 func authServer(store *consumerDB) *Server {
 	return &Server{
-		DB:     store,
-		Cfg:    &config.Config{AdminToken: adminToken},
-		Auth:   NewAuthCache(time.Minute),
-		Logger: zerolog.Nop(),
+		DB:         store,
+		AdminToken: adminToken,
+		Auth:       NewAuthCache(time.Minute),
+		Logger:     zerolog.Nop(),
 	}
 }
 
 func resolve(s *Server, header string) (keyCaller, int) {
 	r := httptest.NewRequest(http.MethodGet, "/key?feature=chat", nil)
 	if header != "" {
-		r.Header.Set("Authorization", header)
+		r.Header.Set(headerAuthorization, header)
 	}
 	w := httptest.NewRecorder()
 	caller, _ := s.resolveKeyCaller(w, r)
@@ -63,10 +62,10 @@ func TestAKeyCallerIsTheAdminAScopedConsumerOrRefused(t *testing.T) {
 		consumer string
 		status   int
 	}{
-		"admin-token":      {header: "Bearer " + adminToken, consumer: adminConsumerID, status: http.StatusOK},
-		"consumer-token":   {header: "Bearer " + consumerToken, active: true, consumer: "c1", status: http.StatusOK},
+		"admin-token":      {header: bearer(adminToken), consumer: adminConsumerID, status: http.StatusOK},
+		"consumer-token":   {header: bearer(consumerToken), active: true, consumer: "c1", status: http.StatusOK},
 		"lowercase-scheme": {header: "bearer " + consumerToken, active: true, consumer: "c1", status: http.StatusOK},
-		"unknown-token":    {header: "Bearer " + consumerToken, status: http.StatusUnauthorized},
+		"unknown-token":    {header: bearer(consumerToken), status: http.StatusUnauthorized},
 		"no-header":        {status: http.StatusUnauthorized},
 		"not-bearer":       {header: "Basic " + consumerToken, status: http.StatusUnauthorized},
 	}
@@ -87,14 +86,14 @@ func TestAKeyCallerIsTheAdminAScopedConsumerOrRefused(t *testing.T) {
 func TestAConsumerIsLookedUpOnceUntilItsEntryExpires(t *testing.T) {
 	store := &consumerDB{active: true}
 	s := authServer(store)
-	resolve(s, "Bearer "+consumerToken)
-	if cached, _ := resolve(s, "Bearer "+consumerToken); store.lookups != 1 || !cached.allowedTierIDs["groq_chat"] {
+	resolve(s, bearer(consumerToken))
+	if cached, _ := resolve(s, bearer(consumerToken)); store.lookups != 1 || !cached.allowedTierIDs["groq_chat"] {
 		t.Fatalf("lookups %d, cached %+v", store.lookups, cached)
 	}
 	s.Auth = NewAuthCache(time.Millisecond)
-	resolve(s, "Bearer "+consumerToken)
+	resolve(s, bearer(consumerToken))
 	time.Sleep(5 * time.Millisecond)
-	resolve(s, "Bearer "+consumerToken)
+	resolve(s, bearer(consumerToken))
 	if store.lookups != 3 {
 		t.Fatalf("lookups %d, want 3", store.lookups)
 	}
@@ -103,14 +102,14 @@ func TestAConsumerIsLookedUpOnceUntilItsEntryExpires(t *testing.T) {
 func TestAnAdminWriteForgetsEveryConsumerSoARevocationTakesHold(t *testing.T) {
 	store := &consumerDB{active: true}
 	s := authServer(store)
-	resolve(s, "Bearer "+consumerToken)
+	resolve(s, bearer(consumerToken))
 
 	store.active = false
 	admin := httptest.NewRequest(http.MethodPost, "/admin/tiers", strings.NewReader("not json"))
-	admin.Header.Set("Authorization", "Bearer "+adminToken)
+	admin.Header.Set(headerAuthorization, bearer(adminToken))
 	NewRouter(s).ServeHTTP(httptest.NewRecorder(), admin)
 
-	if _, status := resolve(s, "Bearer "+consumerToken); status != http.StatusUnauthorized {
+	if _, status := resolve(s, bearer(consumerToken)); status != http.StatusUnauthorized {
 		t.Fatalf("revoked consumer answered %d, want 401", status)
 	}
 }

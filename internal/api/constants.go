@@ -7,5 +7,18 @@ const (
 	exhaustedEvent        = "exhausted"
 	adminConsumerID       = "admin"
 	consumerTokenBytes    = 32
-	pathID                = "id"
+	maxBodySize           = 1 << 20
+
+	pathID       = "id"
+	featureParam = "feature"
+	limitParam   = "limit"
+
+	headerAuthorization = "Authorization"
+	headerContentType   = "Content-Type"
+	bearerScheme        = "Bearer"
+	mediaJSON           = "application/json"
+
+	statusOK        = "ok"
+	statusDeleted   = "deleted"
+	statusExhausted = "exhausted"
 )

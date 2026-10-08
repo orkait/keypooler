@@ -30,8 +30,8 @@ func AdminAuth(token string, logger zerolog.Logger) func(http.Handler) http.Hand
 }
 
 func bearerToken(r *http.Request) (string, bool) {
-	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
+	scheme, token, ok := strings.Cut(r.Header.Get(headerAuthorization), " ")
+	if !ok || !strings.EqualFold(scheme, bearerScheme) {
 		return "", false
 	}
 	return token, true
@@ -53,7 +53,7 @@ func (s *Server) resolveKeyCaller(w http.ResponseWriter, r *http.Request) (keyCa
 		writeError(w, http.StatusUnauthorized, "missing or malformed authorization header")
 		return keyCaller{}, false
 	}
-	if subtle.ConstantTimeCompare([]byte(token), []byte(s.Cfg.AdminToken)) == 1 {
+	if subtle.ConstantTimeCompare([]byte(token), []byte(s.AdminToken)) == 1 {
 		return keyCaller{consumerID: adminConsumerID}, true
 	}
 	caller, found, err := s.consumerCaller(r.Context(), hashToken(token))
@@ -78,7 +78,6 @@ func (s *Server) consumerCaller(ctx context.Context, tokenHash string) (keyCalle
 	if err != nil {
 		return keyCaller{}, false, err
 	}
-	// Confirmed in constant time so the index lookup is no timing oracle.
 	if consumer == nil || subtle.ConstantTimeCompare([]byte(consumer.TokenHash), []byte(tokenHash)) != 1 {
 		return keyCaller{}, false, nil
 	}
@@ -93,13 +92,4 @@ func (s *Server) consumerCaller(ctx context.Context, tokenHash string) (keyCalle
 	caller := keyCaller{consumerID: consumer.ID, allowedTierIDs: allowed}
 	s.Auth.put(tokenHash, caller)
 	return caller, true, nil
-}
-
-func RequestLogger(logger zerolog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			logger.Info().Str("method", r.Method).Str("path", r.URL.Path).Str("remote_addr", r.RemoteAddr).Msg("request received")
-			next.ServeHTTP(w, r)
-		})
-	}
 }

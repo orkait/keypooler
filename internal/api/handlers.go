@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/keypool"
@@ -14,37 +13,32 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const maxBodySize = 1 << 20
-
 type Server struct {
-	DB     db.DBAdapter
-	Pool   *keypool.Manager
-	Usage  *writeback.Writer
-	Auth   *AuthCache
-	Cfg    *config.Config
-	Sealer *crypto.Sealer
-	Logger zerolog.Logger
+	DB         db.DBAdapter
+	Pool       *keypool.Manager
+	Usage      *writeback.Writer
+	Auth       *AuthCache
+	AdminToken string
+	Sealer     *crypto.Sealer
+	Logger     zerolog.Logger
 }
 
 func (s *Server) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, statusBody{Status: statusOK})
 }
 
 func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"pool_size":  s.Pool.PoolSize(),
-		"encryption": s.Sealer.Enabled(),
-	})
+	writeJSON(w, http.StatusOK, poolHealth{PoolSize: s.Pool.PoolSize(), Encryption: s.Sealer.Enabled()})
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, mediaJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	writeJSON(w, status, errorBody{Error: message})
 }
 
 func decodeJSON(r *http.Request, dst any) error {

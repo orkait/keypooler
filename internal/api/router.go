@@ -9,7 +9,7 @@ func NewRouter(srv *Server) http.Handler {
 	mux.HandleFunc("GET /key", srv.GetKey)
 	mux.HandleFunc("POST /key/{id}/exhausted", srv.ExhaustKey)
 
-	authorized := AdminAuth(srv.Cfg.AdminToken, srv.Logger)
+	authorized := AdminAuth(srv.AdminToken, srv.Logger)
 	admin := func(h http.HandlerFunc) http.Handler { return authorized(srv.Auth.clearAfterWrite(h)) }
 	mux.Handle("GET /admin/tiers", admin(srv.ListTiers))
 	mux.Handle("POST /admin/tiers", admin(srv.CreateTier))
@@ -23,9 +23,5 @@ func NewRouter(srv *Server) http.Handler {
 	mux.Handle("DELETE /admin/consumers/{id}", admin(srv.DeleteConsumer))
 	mux.Handle("POST /admin/consumers/{id}/scopes", admin(srv.AddConsumerScope))
 	mux.Handle("GET /admin/usage", admin(srv.ListUsageEvents))
-
-	if !srv.Cfg.LogRequests {
-		return mux
-	}
-	return RequestLogger(srv.Logger)(mux)
+	return mux
 }

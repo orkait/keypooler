@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/orkait/keypooler/internal/db"
 
@@ -45,7 +44,7 @@ func (s *Server) CreateConsumer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create consumer")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": consumer.ID, "name": consumer.Name, "token": token})
+	writeJSON(w, http.StatusCreated, createdConsumer{ID: consumer.ID, Name: consumer.Name, Token: token})
 }
 
 func (s *Server) ListConsumers(w http.ResponseWriter, r *http.Request) {
@@ -69,8 +68,7 @@ func (s *Server) ListConsumers(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tiers {
 		tierName[t.ID] = t.Name
 	}
-
-	result := make([]map[string]any, len(consumers))
+	listed := make([]listedConsumer, len(consumers))
 	for i, c := range consumers {
 		scopes := []string{}
 		for _, id := range byConsumer[c.ID] {
@@ -78,15 +76,9 @@ func (s *Server) ListConsumers(w http.ResponseWriter, r *http.Request) {
 				scopes = append(scopes, name)
 			}
 		}
-		result[i] = map[string]any{
-			"id":          c.ID,
-			"name":        c.Name,
-			"description": c.Description,
-			"is_active":   c.IsActive,
-			"scopes":      scopes,
-		}
+		listed[i] = listedConsumer{ID: c.ID, Name: c.Name, Description: c.Description, IsActive: c.IsActive, Scopes: scopes}
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, listed)
 }
 
 func (s *Server) DeleteConsumer(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +86,7 @@ func (s *Server) DeleteConsumer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to delete consumer")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	writeJSON(w, http.StatusOK, statusBody{Status: statusDeleted})
 }
 
 func (s *Server) AddConsumerScope(w http.ResponseWriter, r *http.Request) {
@@ -124,24 +116,19 @@ func (s *Server) AddConsumerScope(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to add scope")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"consumer_id": id, "tier": tier.Name})
+	writeJSON(w, http.StatusCreated, grantedScope{ConsumerID: id, Tier: tier.Name})
 }
 
 func (s *Server) ListUsageEvents(w http.ResponseWriter, r *http.Request) {
-	limit := parseLimit(r.URL.Query().Get("limit"), defaultUsageListLimit, maxUsageListLimit)
+	limit := parseLimit(r.URL.Query().Get(limitParam), defaultUsageListLimit, maxUsageListLimit)
 	events, err := s.DB.ListUsageEvents(r.Context(), limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database error")
 		return
 	}
-	result := make([]map[string]any, len(events))
+	listed := make([]usageEvent, len(events))
 	for i, e := range events {
-		result[i] = map[string]any{
-			"key_id":      e.KeyID,
-			"consumer_id": e.ConsumerID,
-			"feature":     e.Feature,
-			"created_at":  e.CreatedAt.UTC().Format(time.RFC3339),
-		}
+		listed[i] = usageEvent{KeyID: e.KeyID, ConsumerID: e.ConsumerID, Feature: e.Feature, CreatedAt: rfc3339(e.CreatedAt)}
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, listed)
 }

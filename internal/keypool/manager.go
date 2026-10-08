@@ -38,7 +38,6 @@ type Manager struct {
 	logger zerolog.Logger
 }
 
-// Served is copied under the pool lock: a reload rewrites the live key.
 type Served struct {
 	ID       string
 	KeyValue string
@@ -182,7 +181,6 @@ func (m *Manager) TierOf(id string) (string, bool) {
 	return "", false
 }
 
-// MarkExhausted writes outside the pool lock so draws never wait on the database.
 func (m *Manager) MarkExhausted(id string, until time.Time) bool {
 	m.mu.Lock()
 	key := m.find(id)

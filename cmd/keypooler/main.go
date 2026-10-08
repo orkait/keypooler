@@ -33,7 +33,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		os.Exit(1)
 	}
-	logger := newLogger(cfg)
+	logger := zerolog.New(os.Stdout).Level(zerolog.InfoLevel).With().Timestamp().Logger()
 	logger.Info().Msg("starting keypooler")
 
 	store := openStore(cfg, logger)
@@ -52,21 +52,21 @@ func main() {
 	logger.Info().Int("pool_size", pool.PoolSize()).Bool("encryption", sealer.Enabled()).Msg("key pool initialized")
 
 	handler := api.NewRouter(&api.Server{
-		DB:     store,
-		Pool:   pool,
-		Usage:  usage,
-		Auth:   api.NewAuthCache(authCacheTTL),
-		Cfg:    cfg,
-		Sealer: sealer,
-		Logger: logger,
+		DB:         store,
+		Pool:       pool,
+		Usage:      usage,
+		Auth:       api.NewAuthCache(authCacheTTL),
+		AdminToken: cfg.AdminToken,
+		Sealer:     sealer,
+		Logger:     logger,
 	})
-	serveUntilSignalled(cfg, handler, logger)
+	serveUntilSignalled(handler, logger)
 	stopWriteback()
 	logger.Info().Msg("keypooler stopped")
 }
 
 func openStore(cfg *config.Config, logger zerolog.Logger) *db.PostgresAdapter {
-	store, err := db.NewPostgresAdapter(cfg.DatabaseURL, cfg.DBMaxOpenConns)
+	store, err := db.NewPostgresAdapter(cfg.DatabaseURL, config.MaxDBConns)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize database")
 	}
@@ -93,19 +93,19 @@ func startWriteback(store writeback.Store, logger zerolog.Logger) (*writeback.Wr
 	}
 }
 
-func serveUntilSignalled(cfg *config.Config, handler http.Handler, logger zerolog.Logger) {
+func serveUntilSignalled(handler http.Handler, logger zerolog.Logger) {
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.ServerPort),
+		Addr:         config.Addr,
 		Handler:      handler,
-		ReadTimeout:  cfg.ServerReadTimeout,
-		WriteTimeout: cfg.ServerWriteTimeout,
-		IdleTimeout:  cfg.ServerIdleTimeout,
+		ReadTimeout:  config.ReadTimeout,
+		WriteTimeout: config.WriteTimeout,
+		IdleTimeout:  config.IdleTimeout,
 	}
 	signalled, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
-		logger.Info().Int("port", cfg.ServerPort).Msg("HTTP server listening")
+		logger.Info().Str("addr", config.Addr).Msg("HTTP server listening")
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatal().Err(err).Msg("HTTP server error")
 		}
@@ -113,23 +113,9 @@ func serveUntilSignalled(cfg *config.Config, handler http.Handler, logger zerolo
 	<-signalled.Done()
 	logger.Info().Msg("shutdown signal received")
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.ServerShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error().Err(err).Msg("HTTP server shutdown error")
 	}
-}
-
-func newLogger(cfg *config.Config) zerolog.Logger {
-	level, err := zerolog.ParseLevel(cfg.LogLevel)
-	if err != nil {
-		level = zerolog.InfoLevel
-	}
-	var logger zerolog.Logger
-	if cfg.LogFormat == config.LogFormatPretty {
-		logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout})
-	} else {
-		logger = zerolog.New(os.Stdout)
-	}
-	return logger.Level(level).With().Timestamp().Logger()
 }

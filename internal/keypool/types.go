@@ -33,7 +33,6 @@ type PoolKey struct {
 	rateCounters map[string]*rateCounter
 }
 
-// load keeps the usage count: it runs ahead of the database by unflushed writeback.
 func (k *PoolKey) load(row *db.Key, features map[string]FeatureLimit, secrets map[string]string) {
 	k.ID = row.ID
 	k.Name = row.Name
