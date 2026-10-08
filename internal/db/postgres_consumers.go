@@ -133,9 +133,6 @@ func (a *PostgresAdapter) RecordUsageEvents(ctx context.Context, events []*Usage
 }
 
 func (a *PostgresAdapter) ListUsageEvents(ctx context.Context, limit int) ([]*UsageEvent, error) {
-	if limit <= 0 {
-		limit = 100
-	}
 	rows, err := a.pool.Query(ctx,
 		"SELECT id, key_id, consumer_id, feature, created_at FROM usage_events ORDER BY created_at DESC, id DESC LIMIT $1",
 		limit,

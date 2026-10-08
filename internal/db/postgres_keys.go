@@ -114,13 +114,9 @@ func (a *PostgresAdapter) SetTierFeatures(ctx context.Context, tierID string, fe
 		return err
 	}
 	for _, f := range features {
-		window := f.WindowSeconds
-		if window <= 0 {
-			window = 60
-		}
 		if _, err := tx.Exec(ctx,
 			"INSERT INTO tier_features (tier_id, feature, rate_limit, window_seconds) VALUES ($1, $2, $3, $4)",
-			tierID, f.Feature, f.RateLimit, window,
+			tierID, f.Feature, f.RateLimit, f.WindowSeconds,
 		); err != nil {
 			return err
 		}

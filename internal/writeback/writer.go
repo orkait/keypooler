@@ -13,8 +13,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// DefaultMaxEvents bounds the events held while the database is unreachable.
-const DefaultMaxEvents = 10_000
+const (
+	// DefaultMaxEvents bounds the events held while the database is unreachable.
+	DefaultMaxEvents = 10_000
+	// finalFlushTimeout bounds the shutdown flush, so a dead database cannot hold the exit.
+	finalFlushTimeout = 10 * time.Second
+)
 
 // Store is the slice of the database a flush writes to.
 type Store interface {
@@ -142,7 +146,7 @@ func (w *Writer) Run(ctx context.Context, period time.Duration) {
 		case <-ticker.C:
 			w.Flush(ctx)
 		case <-ctx.Done():
-			final, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			final, cancel := context.WithTimeout(context.Background(), finalFlushTimeout)
 			w.Flush(final)
 			cancel()
 			return

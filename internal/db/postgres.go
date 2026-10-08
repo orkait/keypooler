@@ -11,6 +11,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	minConns        = 1
+	maxConnIdleTime = 5 * time.Minute
+	connectTimeout  = 10 * time.Second
+)
+
 // PostgresAdapter implements DBAdapter on a native pgx pool: the binary protocol and
 // a per-connection prepared-statement cache, so a repeated query is one round trip.
 type PostgresAdapter struct {
@@ -28,10 +34,10 @@ func NewPostgresAdapter(dsn string, maxConns int) (*PostgresAdapter, error) {
 		maxConns = 1
 	}
 	cfg.MaxConns = int32(maxConns)
-	cfg.MinConns = 1
-	cfg.MaxConnIdleTime = 5 * time.Minute
+	cfg.MinConns = minConns
+	cfg.MaxConnIdleTime = maxConnIdleTime
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

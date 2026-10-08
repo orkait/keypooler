@@ -197,7 +197,7 @@ func (s *Server) ListUsageEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := parseLimit(r.URL.Query().Get("limit"), 100, 1000)
+	limit := parseLimit(r.URL.Query().Get("limit"), defaultUsageListLimit, maxUsageListLimit)
 
 	ctx := r.Context()
 	events, err := s.DB.ListUsageEvents(ctx, limit)

@@ -48,7 +48,7 @@ func TestTiersAndFeaturesRoundTrip(t *testing.T) {
 	a, ctx := freshDB(t), context.Background()
 	seedTier(t, a, "groq_chat")
 
-	if err := a.SetTierFeatures(ctx, "groq_chat", []*TierFeature{{Feature: "chat", RateLimit: 30}, {Feature: "embed", RateLimit: 5, WindowSeconds: 3600}}); err != nil {
+	if err := a.SetTierFeatures(ctx, "groq_chat", []*TierFeature{{Feature: "chat", RateLimit: 30, WindowSeconds: 60}, {Feature: "embed", RateLimit: 5, WindowSeconds: 3600}}); err != nil {
 		t.Fatal(err)
 	}
 	features, err := a.GetTierFeatures(ctx, "groq_chat")
@@ -200,7 +200,7 @@ func TestUsageEventsLandInOneBatchKeepingWhenTheyHappened(t *testing.T) {
 	if !events[0].CreatedAt.Equal(base.Add(2*time.Second)) || events[0].ConsumerID != "c2" {
 		t.Fatalf("not newest first, or time not kept: %+v", events[0])
 	}
-	all, _ := a.ListUsageEvents(ctx, 0)
+	all, _ := a.ListUsageEvents(ctx, 10)
 	blank := 0
 	for _, e := range all {
 		if e.ConsumerID == "" {
