@@ -79,10 +79,6 @@ func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]boo
 	defer m.mu.RUnlock()
 
 	available := m.candidates(feature, allowedTierIDs)
-
-	// Round-robin over candidates: a key is served only if it passes BOTH the
-	// rate window and the cumulative usage gate. Each rejected candidate is dropped
-	// and the next is tried until one serves or none remain.
 	for len(available) > 0 {
 		selected := m.rr.Select(available)
 		if selected == nil {
@@ -95,8 +91,6 @@ func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]boo
 			available = removeKey(available, selected)
 			continue
 		}
-		// Atomic cumulative usage/credit gate. The gate also rolls over a windowed
-		// (monthly) budget in-memory and reports whether a reset happened.
 		ok, didReset, windowStart := selected.TryConsumeUsage()
 		if !ok {
 			available = removeKey(available, selected)

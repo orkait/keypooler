@@ -140,7 +140,7 @@ func (k *PoolKey) Available() bool {
 // elapsed (now - UsageWindowStart >= window), the in-memory count is reset to 0
 // and the window restarts at now BEFORE the limit check. The reset is reported
 // via the returned didReset/windowStart so the caller can persist it. When
-// UsageWindowSeconds is nil the limit is a lifetime cap (the original behaviour).
+// UsageWindowSeconds is nil the limit is a lifetime cap.
 //
 // The window-check, reset, limit-check, and increment all happen in one critical
 // section under the key lock so concurrent callers cannot over-serve a limited

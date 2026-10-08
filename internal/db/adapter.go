@@ -7,7 +7,6 @@ import (
 
 // DBAdapter defines the interface for keypooler database operations.
 // Keypooler owns tiers, tier features, API keys, consumers, and usage events.
-// Executions, integrations, and dead letters are owned by pulse.
 type DBAdapter interface {
 	Close() error
 
@@ -94,7 +93,8 @@ type Key struct {
 	CreatedAt      time.Time
 }
 
-// KeySecret is a named secret bound to a key, stored as plaintext.
+// KeySecret is a named secret bound to a key. Value is as stored: sealed when
+// encryption is on, plaintext otherwise.
 type KeySecret struct {
 	KeyID string
 	Name  string
