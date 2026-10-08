@@ -51,6 +51,22 @@ func NewManager(dbAdap Store, sealer *crypto.Sealer, usage *writeback.Writer, lo
 	return m, nil
 }
 
+// candidates are the keys that could serve the feature right now: in an allowed
+// tier (nil allows every tier), available (active, unexpired, not exhausted,
+// under its usage limit) and offering the feature. Callers hold m.mu.
+func (m *Manager) candidates(feature string, allowedTierIDs map[string]bool) []*PoolKey {
+	var found []*PoolKey
+	for _, key := range m.keys {
+		if allowedTierIDs != nil && !allowedTierIDs[key.TierID] {
+			continue
+		}
+		if key.Available() && key.HasFeature(feature) {
+			found = append(found, key)
+		}
+	}
+	return found
+}
+
 // GetKeyForFeature selects an available key that supports the given feature
 // and has rate budget remaining.
 //
@@ -62,25 +78,7 @@ func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]boo
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Filter to keys that are available (active, unexpired, under usage limit),
-	// in an allowed tier, support this feature, and have rate budget.
-	var available []*PoolKey
-	for _, key := range m.keys {
-		if allowedTierIDs != nil && !allowedTierIDs[key.TierID] {
-			continue
-		}
-		if !key.Available() {
-			continue
-		}
-		if !key.HasFeature(feature) {
-			continue
-		}
-		available = append(available, key)
-	}
-
-	if len(available) == 0 {
-		return nil
-	}
+	available := m.candidates(feature, allowedTierIDs)
 
 	// Round-robin over candidates: a key is served only if it passes BOTH the
 	// rate window and the cumulative usage gate. Each rejected candidate is dropped
