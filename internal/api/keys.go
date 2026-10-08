@@ -72,39 +72,81 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// AddKey handles POST /admin/keys
-func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name               string            `json:"name"`
-		Key                string            `json:"key"`
-		Tier               string            `json:"tier"`
-		ExpiresAt          *string           `json:"expires_at"`
-		UsageLimit         *int              `json:"usage_limit"`
-		UsageWindowSeconds *int              `json:"usage_window_seconds"`
-		Metadata           map[string]any    `json:"metadata"`
-		Secrets            map[string]string `json:"secrets"`
-	}
+// addKeyBody is what POST /admin/keys takes.
+type addKeyBody struct {
+	Name               string            `json:"name"`
+	Key                string            `json:"key"`
+	Tier               string            `json:"tier"`
+	ExpiresAt          *string           `json:"expires_at"`
+	UsageLimit         *int              `json:"usage_limit"`
+	UsageWindowSeconds *int              `json:"usage_window_seconds"`
+	Metadata           map[string]any    `json:"metadata"`
+	Secrets            map[string]string `json:"secrets"`
+}
+
+// decodeAddKey reads the request, requires name, key and tier, and parses the
+// optional expiry.
+func decodeAddKey(w http.ResponseWriter, r *http.Request) (addKeyBody, *time.Time, bool) {
+	var body addKeyBody
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
+		return body, nil, false
 	}
 	if body.Name == "" || body.Key == "" || body.Tier == "" {
 		writeError(w, http.StatusBadRequest, "name, key, and tier are required")
+		return body, nil, false
+	}
+	if body.ExpiresAt == nil || *body.ExpiresAt == "" {
+		return body, nil, true
+	}
+	expiresAt, err := time.Parse(time.RFC3339, *body.ExpiresAt)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "expires_at must be RFC3339")
+		return body, nil, false
+	}
+	return body, &expiresAt, true
+}
+
+// sealedRows builds the key row and its secret rows, each value sealed (encrypted
+// iff encryption is enabled) before it is stored.
+func (s *Server) sealedRows(body addKeyBody, tierID string, expiresAt *time.Time) (*db.Key, []*db.KeySecret, error) {
+	sealedKey, err := s.Sealer.Seal(body.Key)
+	if err != nil {
+		return nil, nil, err
+	}
+	metadata := body.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	key := &db.Key{
+		ID:                 uuid.New().String(),
+		Name:               body.Name,
+		KeyValue:           sealedKey,
+		TierID:             tierID,
+		IsActive:           true,
+		ExpiresAt:          expiresAt,
+		UsageLimit:         body.UsageLimit,
+		UsageWindowSeconds: body.UsageWindowSeconds,
+		Metadata:           metadata,
+	}
+	secrets := make([]*db.KeySecret, 0, len(body.Secrets))
+	for name, value := range body.Secrets {
+		sealed, err := s.Sealer.Seal(value)
+		if err != nil {
+			return nil, nil, err
+		}
+		secrets = append(secrets, &db.KeySecret{KeyID: key.ID, Name: name, Value: sealed})
+	}
+	return key, secrets, nil
+}
+
+// AddKey handles POST /admin/keys
+func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
+	body, expiresAt, ok := decodeAddKey(w, r)
+	if !ok {
 		return
 	}
-
-	var expiresAt *time.Time
-	if body.ExpiresAt != nil && *body.ExpiresAt != "" {
-		t, perr := time.Parse(time.RFC3339, *body.ExpiresAt)
-		if perr != nil {
-			writeError(w, http.StatusBadRequest, "expires_at must be RFC3339")
-			return
-		}
-		expiresAt = &t
-	}
-
 	ctx := r.Context()
-
 	tier, err := s.DB.GetTierByName(ctx, body.Tier)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database error")
@@ -114,59 +156,27 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "tier not found: "+body.Tier)
 		return
 	}
-
-	sealedKey, err := s.Sealer.Seal(body.Key)
+	key, secrets, err := s.sealedRows(body, tier.ID, expiresAt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to seal key")
 		return
-	}
-
-	// Seal each bound secret (encrypted iff encryption is enabled) before persisting.
-	sealedSecrets := make([]*db.KeySecret, 0, len(body.Secrets))
-	keyID := uuid.New().String()
-	for name, value := range body.Secrets {
-		sealedVal, eerr := s.Sealer.Seal(value)
-		if eerr != nil {
-			writeError(w, http.StatusInternalServerError, "failed to seal secret")
-			return
-		}
-		sealedSecrets = append(sealedSecrets, &db.KeySecret{KeyID: keyID, Name: name, Value: sealedVal})
-	}
-
-	metadata := body.Metadata
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-
-	key := &db.Key{
-		ID:                 keyID,
-		Name:               body.Name,
-		KeyValue:           sealedKey,
-		TierID:             tier.ID,
-		IsActive:           true,
-		ExpiresAt:          expiresAt,
-		UsageLimit:         body.UsageLimit,
-		UsageWindowSeconds: body.UsageWindowSeconds,
-		Metadata:           metadata,
 	}
 	if err := s.DB.CreateKey(ctx, key); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create key")
 		return
 	}
-
-	if len(sealedSecrets) > 0 {
-		if err := s.DB.SetKeySecrets(ctx, key.ID, sealedSecrets); err != nil {
+	if len(secrets) > 0 {
+		if err := s.DB.SetKeySecrets(ctx, key.ID, secrets); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to store key secrets")
 			return
 		}
 	}
-
 	if err := s.Pool.ReloadKeys(); err != nil {
 		s.Logger.Error().Err(err).Msg("failed to reload key pool after adding key")
 	}
 
-	secretNames := make([]string, 0, len(sealedSecrets))
-	for _, sec := range sealedSecrets {
+	secretNames := make([]string, 0, len(secrets))
+	for _, sec := range secrets {
 		secretNames = append(secretNames, sec.Name)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -176,7 +186,7 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		"expires_at":           body.ExpiresAt,
 		"usage_limit":          body.UsageLimit,
 		"usage_window_seconds": body.UsageWindowSeconds,
-		"metadata":             metadata,
+		"metadata":             key.Metadata,
 		"secret_names":         secretNames,
 	})
 }
