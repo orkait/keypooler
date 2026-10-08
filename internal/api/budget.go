@@ -38,8 +38,7 @@ func budgetViewOf(b *db.Budget) *budgetView {
 
 func (s *Server) SetKeyBudget(w http.ResponseWriter, r *http.Request) {
 	var body map[string]json.RawMessage
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !decodeBody(w, r, &body) {
 		return
 	}
 	raw, present := body[budgetField]
@@ -83,22 +82,15 @@ func (s *Server) ReportSpend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body spendBody
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !decodeBody(w, r, &body) {
 		return
 	}
-	if _, err := (&budgetBody{Amount: body.Amount, Unit: body.Unit}).budget(); err != nil || body.RequestID == "" {
-		writeError(w, http.StatusBadRequest, "amount above 0, a known unit and a request_id are required")
+	if err := keypool.ValidateSpend(body.Amount, body.Unit, body.RequestID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	id := r.PathValue(pathID)
-	tierID, found := s.Pool.TierOf(id)
-	if !found {
-		writeError(w, http.StatusNotFound, keypool.ErrUnknownKey.Error())
-		return
-	}
-	if caller.allowedTierIDs != nil && !caller.allowedTierIDs[tierID] {
-		writeError(w, http.StatusForbidden, "key is outside your scope")
+	if !s.keyInScope(w, caller, id) {
 		return
 	}
 	spend, err := s.Pool.RecordSpend(r.Context(), &db.SpendEvent{

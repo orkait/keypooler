@@ -23,4 +23,8 @@ const (
 	statusOK        = "ok"
 	statusDeleted   = "deleted"
 	statusExhausted = "exhausted"
+
+	msgInvalidJSON   = "invalid JSON: "
+	msgDatabaseError = "database error"
+	msgTierNotFound  = "tier not found: "
 )

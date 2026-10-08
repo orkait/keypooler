@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -39,8 +40,7 @@ func tierResponse(tier *db.Tier, features map[string]featureLimitBody) tierView 
 
 func decodeTierBody(w http.ResponseWriter, r *http.Request) (tierBody, bool) {
 	var body tierBody
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !decodeBody(w, r, &body) {
 		return body, false
 	}
 	if body.Name == "" || len(body.Features) == 0 {
@@ -48,6 +48,19 @@ func decodeTierBody(w http.ResponseWriter, r *http.Request) (tierBody, bool) {
 		return body, false
 	}
 	return body, true
+}
+
+func (s *Server) tierNamed(ctx context.Context, w http.ResponseWriter, name string) (*db.Tier, bool) {
+	tier, err := s.DB.GetTierByName(ctx, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, msgDatabaseError)
+		return nil, false
+	}
+	if tier == nil {
+		writeError(w, http.StatusNotFound, msgTierNotFound+name)
+		return nil, false
+	}
+	return tier, true
 }
 
 func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
@@ -76,13 +89,8 @@ func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tier, err := s.DB.GetTierByName(ctx, body.Name)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
-		return
-	}
-	if tier == nil {
-		writeError(w, http.StatusNotFound, "tier not found: "+body.Name)
+	tier, ok := s.tierNamed(ctx, w, body.Name)
+	if !ok {
 		return
 	}
 	if body.Description != nil {
@@ -104,13 +112,8 @@ func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
 func (s *Server) DeleteTier(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue(pathName)
-	tier, err := s.DB.GetTierByName(ctx, name)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
-		return
-	}
-	if tier == nil {
-		writeError(w, http.StatusNotFound, "tier not found: "+name)
+	tier, ok := s.tierNamed(ctx, w, name)
+	if !ok {
 		return
 	}
 	switch err := s.DB.DeleteTier(ctx, tier.ID); {
@@ -118,7 +121,7 @@ func (s *Server) DeleteTier(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "tier still has keys; delete them first")
 		return
 	case errors.Is(err, db.ErrTierNotFound):
-		writeError(w, http.StatusNotFound, "tier not found: "+name)
+		writeError(w, http.StatusNotFound, msgTierNotFound+name)
 		return
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, "failed to delete tier")
@@ -132,12 +135,12 @@ func (s *Server) ListTiers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tiers, err := s.DB.GetAllTiers(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
+		writeError(w, http.StatusInternalServerError, msgDatabaseError)
 		return
 	}
 	byTier, err := s.DB.TierFeaturesByTier(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
+		writeError(w, http.StatusInternalServerError, msgDatabaseError)
 		return
 	}
 	result := make([]tierView, len(tiers))

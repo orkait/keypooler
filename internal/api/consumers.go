@@ -16,8 +16,7 @@ func (s *Server) CreateConsumer(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !decodeBody(w, r, &body) {
 		return
 	}
 	if body.Name == "" {
@@ -51,17 +50,17 @@ func (s *Server) ListConsumers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	consumers, err := s.DB.GetAllConsumers(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
+		writeError(w, http.StatusInternalServerError, msgDatabaseError)
 		return
 	}
 	tiers, err := s.DB.GetAllTiers(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
+		writeError(w, http.StatusInternalServerError, msgDatabaseError)
 		return
 	}
 	byConsumer, err := s.DB.ConsumerScopesByConsumer(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
+		writeError(w, http.StatusInternalServerError, msgDatabaseError)
 		return
 	}
 	tierName := make(map[string]string, len(tiers))
@@ -94,8 +93,7 @@ func (s *Server) AddConsumerScope(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Tier string `json:"tier"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if !decodeBody(w, r, &body) {
 		return
 	}
 	if body.Tier == "" {
@@ -103,13 +101,8 @@ func (s *Server) AddConsumerScope(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tier, err := s.DB.GetTierByName(ctx, body.Tier)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
-		return
-	}
-	if tier == nil {
-		writeError(w, http.StatusNotFound, "tier not found: "+body.Tier)
+	tier, ok := s.tierNamed(ctx, w, body.Tier)
+	if !ok {
 		return
 	}
 	if err := s.DB.AddConsumerScope(ctx, id, tier.ID); err != nil {
@@ -123,7 +116,7 @@ func (s *Server) ListUsageEvents(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get(limitParam), defaultUsageListLimit, maxUsageListLimit)
 	events, err := s.DB.ListUsageEvents(r.Context(), limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database error")
+		writeError(w, http.StatusInternalServerError, msgDatabaseError)
 		return
 	}
 	listed := make([]usageEvent, len(events))

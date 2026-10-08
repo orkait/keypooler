@@ -25,16 +25,35 @@ var (
 	ErrUnknownKey   = errors.New("key not found")
 	ErrUnitMismatch = errors.New("unit does not match the key's budget")
 	ErrBadBudget    = errors.New("invalid budget")
+	ErrBadSpend     = errors.New("invalid spend")
 )
 
 func ValidateBudget(b db.Budget) error {
-	switch {
-	case b.Amount <= 0:
-		return fmt.Errorf("%w: amount must be above 0", ErrBadBudget)
-	case !slices.Contains(units, b.Unit):
-		return fmt.Errorf("%w: unit must be one of %v", ErrBadBudget, units)
-	case b.ResetDay != nil && (*b.ResetDay < firstResetDay || *b.ResetDay > lastResetDay):
+	if err := validAmount(b.Amount, b.Unit); err != nil {
+		return fmt.Errorf("%w: %w", ErrBadBudget, err)
+	}
+	if b.ResetDay != nil && (*b.ResetDay < firstResetDay || *b.ResetDay > lastResetDay) {
 		return fmt.Errorf("%w: reset_day must be %d to %d, or absent for a lifetime budget", ErrBadBudget, firstResetDay, lastResetDay)
+	}
+	return nil
+}
+
+func ValidateSpend(amount float64, unit, requestID string) error {
+	if err := validAmount(amount, unit); err != nil {
+		return fmt.Errorf("%w: %w", ErrBadSpend, err)
+	}
+	if requestID == "" {
+		return fmt.Errorf("%w: request_id is required", ErrBadSpend)
+	}
+	return nil
+}
+
+func validAmount(amount float64, unit string) error {
+	switch {
+	case amount <= 0:
+		return errors.New("amount must be above 0")
+	case !slices.Contains(units, unit):
+		return fmt.Errorf("unit must be one of %v", units)
 	}
 	return nil
 }
