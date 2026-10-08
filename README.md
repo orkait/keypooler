@@ -4,6 +4,8 @@
 
 **One source of truth for API keys in the orkait stack.** Round-robin rotation, per-feature rate limits, monthly usage budgets, scoped consumers, bound secrets, and opt-in encryption at rest.
 
+**Docs: [platform-docs.orkait.com](https://platform-docs.orkait.com)** (sign-in required)
+
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![CGO free](https://img.shields.io/badge/CGO-free-00ADD8?logo=go&logoColor=white)](#-tech)
 [![Postgres](https://img.shields.io/badge/Postgres-pgx-4169E1?logo=postgresql&logoColor=white)](https://github.com/jackc/pgx)
