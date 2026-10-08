@@ -160,6 +160,7 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 | `POST` | `/key/{id}/exhausted` | admin **or** consumer | report a key the provider refused; body `{"until": RFC3339}`, the key is skipped until then and serves again on its own |
 | `POST` | `/key/{id}/spend` | admin **or** consumer | report what a call cost; body `{"amount": 0.0123, "unit": "usd", "request_id": "..."}`, answers `spent`, `remaining`, `resets_at`; a repeated `request_id` is not counted twice, a unit other than the budget's is `409` |
 | `GET` `POST` `PATCH` | `/admin/tiers` | admin | list / create / update tier features |
+| `DELETE` | `/admin/tiers/{name}` | admin | remove a tier with its features and scopes; `409` while any key still uses it |
 | `GET` `POST` | `/admin/keys` | admin | list / add keys |
 | `PATCH` | `/admin/keys/{id}` | admin | set a key's budget, `{"budget": {"amount": 200, "unit": "usd", "reset_day": 1}}`, or clear it with `{"budget": null}` |
 | `DELETE` | `/admin/keys/{id}` | admin | remove a key (+ its secrets) |

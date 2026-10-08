@@ -6,9 +6,31 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var ErrKeyNotFound = errors.New("key not found")
+var (
+	ErrKeyNotFound  = errors.New("key not found")
+	ErrTierNotFound = errors.New("tier not found")
+	ErrTierInUse    = errors.New("tier still has keys")
+)
+
+const foreignKeyViolation = "23503"
+
+func (a *PostgresAdapter) DeleteTier(ctx context.Context, id string) error {
+	tag, err := a.pool.Exec(ctx, "DELETE FROM tiers WHERE id = $1", id)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+		return ErrTierInUse
+	}
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrTierNotFound
+	}
+	return nil
+}
 
 func budgetColumns(b *Budget) (amount *float64, unit *string, resetDay *int) {
 	if b == nil {

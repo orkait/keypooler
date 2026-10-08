@@ -21,6 +21,7 @@ type budgetStore struct {
 	budget  *db.Budget
 	updated bool
 	spent   float64
+	deleted string
 }
 
 func (b *budgetStore) GetAllKeys(context.Context) ([]*db.Key, error) {
@@ -57,6 +58,41 @@ func (b *budgetStore) UpdateKeyBudget(_ context.Context, id string, budget *db.B
 	}
 	b.budget, b.updated = budget, true
 	return nil
+}
+
+func (b *budgetStore) GetTierByName(_ context.Context, name string) (*db.Tier, error) {
+	if name == "missing" {
+		return nil, nil
+	}
+	return &db.Tier{ID: name, Name: name}, nil
+}
+
+func (b *budgetStore) DeleteTier(_ context.Context, id string) error {
+	if id == "anthropic" {
+		return db.ErrTierInUse
+	}
+	b.deleted = id
+	return nil
+}
+
+func TestATierIsDeletedOnlyWhenNoKeyUsesIt(t *testing.T) {
+	cases := map[string]struct {
+		tier   string
+		status int
+	}{
+		"empty":   {"quiver", http.StatusOK},
+		"in use":  {"anthropic", http.StatusConflict},
+		"unknown": {"missing", http.StatusNotFound},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			store, h := budgetServer(t)
+			w := call(h, http.MethodDelete, "/admin/tiers/"+c.tier, adminToken, "")
+			if w.Code != c.status || (c.status == http.StatusOK) != (store.deleted == c.tier) {
+				t.Fatalf("status %d, deleted %q: %s", w.Code, store.deleted, w.Body)
+			}
+		})
+	}
 }
 
 func budgetServer(t *testing.T) (*budgetStore, http.Handler) {

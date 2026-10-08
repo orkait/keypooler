@@ -10,6 +10,7 @@ const (
 	maxBodySize           = 1 << 20
 
 	pathID       = "id"
+	pathName     = "name"
 	featureParam = "feature"
 	limitParam   = "limit"
 	budgetField  = "budget"

@@ -15,6 +15,7 @@ func NewRouter(srv *Server) http.Handler {
 	mux.Handle("GET /admin/tiers", admin(srv.ListTiers))
 	mux.Handle("POST /admin/tiers", admin(srv.CreateTier))
 	mux.Handle("PATCH /admin/tiers", admin(srv.UpdateTierFeatures))
+	mux.Handle("DELETE /admin/tiers/{name}", admin(srv.DeleteTier))
 	mux.Handle("GET /admin/keys", admin(srv.ListKeys))
 	mux.Handle("POST /admin/keys", admin(srv.AddKey))
 	mux.Handle("PATCH /admin/keys/{id}", admin(srv.SetKeyBudget))

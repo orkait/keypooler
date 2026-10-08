@@ -101,6 +101,33 @@ func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tierResponse(tier, echoed))
 }
 
+func (s *Server) DeleteTier(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	name := r.PathValue(pathName)
+	tier, err := s.DB.GetTierByName(ctx, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	if tier == nil {
+		writeError(w, http.StatusNotFound, "tier not found: "+name)
+		return
+	}
+	switch err := s.DB.DeleteTier(ctx, tier.ID); {
+	case errors.Is(err, db.ErrTierInUse):
+		writeError(w, http.StatusConflict, "tier still has keys; delete them first")
+		return
+	case errors.Is(err, db.ErrTierNotFound):
+		writeError(w, http.StatusNotFound, "tier not found: "+name)
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "failed to delete tier")
+		return
+	}
+	s.reload("deleting tier")
+	writeJSON(w, http.StatusOK, statusBody{Status: statusDeleted})
+}
+
 func (s *Server) ListTiers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tiers, err := s.DB.GetAllTiers(ctx)
