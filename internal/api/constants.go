@@ -12,6 +12,7 @@ const (
 	pathID       = "id"
 	featureParam = "feature"
 	limitParam   = "limit"
+	budgetField  = "budget"
 
 	headerAuthorization = "Authorization"
 	headerContentType   = "Content-Type"

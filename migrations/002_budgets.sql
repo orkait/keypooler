@@ -1,0 +1,16 @@
+ALTER TABLE keys ADD COLUMN IF NOT EXISTS budget_amount DOUBLE PRECISION;
+ALTER TABLE keys ADD COLUMN IF NOT EXISTS budget_unit TEXT;
+ALTER TABLE keys ADD COLUMN IF NOT EXISTS budget_reset_day INTEGER;
+ALTER TABLE keys ADD COLUMN IF NOT EXISTS spent DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE keys ADD COLUMN IF NOT EXISTS spent_period_start TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS spend_events (
+    id TEXT PRIMARY KEY,
+    key_id TEXT NOT NULL,
+    consumer_id TEXT,
+    amount DOUBLE PRECISION NOT NULL,
+    unit TEXT NOT NULL,
+    request_id TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS spend_events_key_created ON spend_events (key_id, created_at);

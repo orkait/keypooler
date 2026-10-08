@@ -20,7 +20,7 @@ func freshDB(t *testing.T) *PostgresAdapter {
 	}
 	t.Cleanup(func() { a.Close() })
 	ctx := context.Background()
-	if _, err := a.Pool().Exec(ctx, `DROP TABLE IF EXISTS usage_events, consumer_scopes, consumers,
+	if _, err := a.Pool().Exec(ctx, `DROP TABLE IF EXISTS spend_events, usage_events, consumer_scopes, consumers,
 		key_secrets, keys, tier_features, tiers, schema_migrations`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}

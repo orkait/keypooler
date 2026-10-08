@@ -19,6 +19,17 @@ type fakeStore struct {
 	features map[string][]*db.TierFeature
 	inc      int
 	reset    int
+	spent    float64
+	spends   int
+	period   *time.Time
+}
+
+func (f *fakeStore) RecordSpend(_ context.Context, _ *db.SpendEvent, period *time.Time) (float64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.spends++
+	f.period = period
+	return f.spent, false, nil
 }
 
 func (f *fakeStore) GetAllKeys(context.Context) ([]*db.Key, error) { return f.keys, nil }

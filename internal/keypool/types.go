@@ -25,6 +25,9 @@ type PoolKey struct {
 	UsageWindowSeconds *int
 	UsageWindowStart   *time.Time
 	ExhaustedUntil     *time.Time
+	Budget             *db.Budget
+	Spent              float64
+	SpentPeriodStart   *time.Time
 	Metadata           map[string]any
 	Secrets            map[string]string
 	Features           map[string]FeatureLimit
@@ -43,6 +46,9 @@ func (k *PoolKey) load(row *db.Key, features map[string]FeatureLimit, secrets ma
 	k.UsageLimit = row.UsageLimit
 	k.UsageWindowSeconds = row.UsageWindowSeconds
 	k.ExhaustedUntil = row.ExhaustedUntil
+	k.Budget = row.Budget
+	k.Spent = row.Spent
+	k.SpentPeriodStart = row.SpentPeriodStart
 	k.Metadata = row.Metadata
 	k.Secrets = secrets
 	k.Features = features
@@ -92,7 +98,8 @@ func (k *PoolKey) Available() bool {
 	now := time.Now()
 	return k.IsActive &&
 		(k.ExpiresAt == nil || now.Before(*k.ExpiresAt)) &&
-		(k.ExhaustedUntil == nil || !now.Before(*k.ExhaustedUntil))
+		(k.ExhaustedUntil == nil || !now.Before(*k.ExhaustedUntil)) &&
+		k.withinBudget(now)
 }
 
 func (k *PoolKey) TryConsumeUsage() (ok bool, didReset bool, windowStart time.Time) {

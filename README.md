@@ -31,6 +31,7 @@ caller  ──►  GET /key?feature=firecrawl_scrape  ──►  keypooler picks
 | 🔄 **Rotation** | Round-robin across all keys in a tier; exhausted keys are skipped, the next is tried. |
 | ⏱️ **Rate limits** | Per-feature, windowed (e.g. 10 calls / 60s). Defined on the tier, applied per key. |
 | 📅 **Usage budgets** | Per-key `usage_limit` with an optional `usage_window_seconds` (e.g. 2592000 = monthly auto-reset). `nil` window = lifetime cap. |
+| 💰 **Spend budgets** | Per-key `budget` in `usd` or `credits`, refilled each month on its `reset_day` (1-28) or lifetime without one. Whoever used a key reports what it cost (`POST /key/{id}/spend`, idempotent on `request_id`); a key at its budget is not served until the next reset. |
 | 👤 **Scoped consumers** | Each client gets a bearer token scoped to specific tiers. The admin token is a superuser. |
 | 🔗 **Bound secrets** | Extra named secrets travel with a key (e.g. a Firecrawl `webhook_secret`), returned at serve time. |
 | 🔐 **Opt-in encryption** | Plaintext at rest by default; set `ENCRYPTION_KEY` to encrypt new writes. Self-tagged, so both coexist. |
@@ -62,7 +63,7 @@ flowchart LR
 | Consumer token | only granted tiers (`401` unknown, `403` out-of-scope) | denied |
 
 <details>
-<summary>🗄️ <b>Data model</b> (7 tables)</summary>
+<summary>🗄️ <b>Data model</b> (8 tables)</summary>
 
 | Table | Holds |
 |---|---|
@@ -73,8 +74,9 @@ flowchart LR
 | `consumers` | scoped clients, bearer token stored sha256-hashed (shown once) |
 | `consumer_scopes` | which tiers a consumer may draw from |
 | `usage_events` | append-only audit, one row per serve |
+| `spend_events` | one row per spend report, unique on `request_id`; `keys` carries `budget_*`, `spent` and `spent_period_start` |
 
-Migrations are a single consolidated `migrations/001_init.sql`, idempotent (`CREATE ... IF NOT EXISTS`). Deletes also clean up children explicitly, in one transaction, so a reused id can never re-grant an old scope.
+Migrations are `migrations/001_init.sql` and `002_budgets.sql`, each idempotent (`IF NOT EXISTS`). Deletes also clean up children explicitly, in one transaction, so a reused id can never re-grant an old scope.
 </details>
 
 <details>
@@ -156,8 +158,10 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 | `GET` | `/health` | public | liveness |
 | `GET` | `/key?feature=X` | admin **or** consumer | draw a rotated key for a feature |
 | `POST` | `/key/{id}/exhausted` | admin **or** consumer | report a key the provider refused; body `{"until": RFC3339}`, the key is skipped until then and serves again on its own |
+| `POST` | `/key/{id}/spend` | admin **or** consumer | report what a call cost; body `{"amount": 0.0123, "unit": "usd", "request_id": "..."}`, answers `spent`, `remaining`, `resets_at`; a repeated `request_id` is not counted twice, a unit other than the budget's is `409` |
 | `GET` `POST` `PATCH` | `/admin/tiers` | admin | list / create / update tier features |
 | `GET` `POST` | `/admin/keys` | admin | list / add keys |
+| `PATCH` | `/admin/keys/{id}` | admin | set a key's budget, `{"budget": {"amount": 200, "unit": "usd", "reset_day": 1}}`, or clear it with `{"budget": null}` |
 | `DELETE` | `/admin/keys/{id}` | admin | remove a key (+ its secrets) |
 | `GET` `POST` | `/admin/consumers` | admin | list / create consumers |
 | `DELETE` | `/admin/consumers/{id}` | admin | remove a consumer (+ its scopes) |
@@ -191,7 +195,7 @@ internal/
   db/                    Postgres adapter (pgx pool), migrations
   keypool/               round-robin pool, rate + usage budgets
   writeback/             usage counts and audit events, flushed behind the serve
-migrations/001_init.sql  consolidated schema
+migrations/              001_init.sql schema, 002_budgets.sql spend budgets
 ```
 
 ## 🚢 Deployment
