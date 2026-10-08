@@ -24,11 +24,6 @@ func generateConsumerToken() (string, error) {
 // Generates a random bearer token server-side, stores only its sha256 hash, and
 // returns the plaintext token ONCE. The token is never retrievable again.
 func (s *Server) CreateConsumer(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	var body struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -74,11 +69,6 @@ func (s *Server) CreateConsumer(w http.ResponseWriter, r *http.Request) {
 // ListConsumers handles GET /admin/consumers
 // Returns identity + scoped tier NAMES. Never returns the token or its hash.
 func (s *Server) ListConsumers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	ctx := r.Context()
 	consumers, err := s.DB.GetAllConsumers(ctx)
 	if err != nil {
@@ -124,19 +114,8 @@ func (s *Server) ListConsumers(w http.ResponseWriter, r *http.Request) {
 
 // DeleteConsumer handles DELETE /admin/consumers/{id}
 func (s *Server) DeleteConsumer(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	id := extractPathParam(r.URL.Path, "/admin/consumers/")
-	if id == "" {
-		writeError(w, http.StatusBadRequest, "consumer id required")
-		return
-	}
-
 	ctx := r.Context()
-	if err := s.DB.DeleteConsumer(ctx, id); err != nil {
+	if err := s.DB.DeleteConsumer(ctx, r.PathValue(pathID)); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete consumer")
 		return
 	}
@@ -146,18 +125,7 @@ func (s *Server) DeleteConsumer(w http.ResponseWriter, r *http.Request) {
 // AddConsumerScope handles POST /admin/consumers/{id}/scopes
 // Grants a consumer access to a tier by name.
 func (s *Server) AddConsumerScope(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	// Path is /admin/consumers/{id}/scopes
-	id := extractPathParam(r.URL.Path, "/admin/consumers/")
-	if id == "" {
-		writeError(w, http.StatusBadRequest, "consumer id required")
-		return
-	}
-
+	id := r.PathValue(pathID)
 	var body struct {
 		Tier string `json:"tier"`
 	}
@@ -193,11 +161,6 @@ func (s *Server) AddConsumerScope(w http.ResponseWriter, r *http.Request) {
 
 // ListUsageEvents handles GET /admin/usage?limit=N
 func (s *Server) ListUsageEvents(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	limit := parseLimit(r.URL.Query().Get("limit"), defaultUsageListLimit, maxUsageListLimit)
 
 	ctx := r.Context()

@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/orkait/keypooler/internal/db"
@@ -21,11 +20,6 @@ import (
 //     401 for an unknown/inactive token; 403 when no scoped tier serves the
 //     feature with budget.
 func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	caller, ok := s.resolveKeyCaller(w, r)
 	if !ok {
 		return // resolveKeyCaller already wrote the 401
@@ -80,11 +74,6 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 
 // AddKey handles POST /admin/keys
 func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	var body struct {
 		Name               string            `json:"name"`
 		Key                string            `json:"key"`
@@ -194,11 +183,6 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 
 // ListKeys handles GET /admin/keys
 func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	statuses := s.Pool.GetHealthStatus()
 	result := make([]map[string]any, len(statuses))
 	for i, ks := range statuses {
@@ -240,19 +224,11 @@ func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 // period; the pool stops serving it until then and resumes on its own. Auth is
 // admin-OR-consumer like GetKey; a consumer may only report keys in its scope.
 func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	caller, ok := s.resolveKeyCaller(w, r)
 	if !ok {
 		return
 	}
-	id := extractPathParam(r.URL.Path, "/key/")
-	if id == "" || !strings.HasSuffix(r.URL.Path, "/exhausted") {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
+	id := r.PathValue(pathID)
 	var body struct {
 		Until string `json:"until"`
 	}
@@ -284,19 +260,8 @@ func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
 
 // DeleteKey handles DELETE /admin/keys/{id}
 func (s *Server) DeleteKey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	id := extractPathParam(r.URL.Path, "/admin/keys/")
-	if id == "" {
-		writeError(w, http.StatusBadRequest, "key id required")
-		return
-	}
-
 	ctx := r.Context()
-	if err := s.DB.DeleteKey(ctx, id); err != nil {
+	if err := s.DB.DeleteKey(ctx, r.PathValue(pathID)); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete key")
 		return
 	}

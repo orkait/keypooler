@@ -67,10 +67,6 @@ func decodeTierBody(w http.ResponseWriter, r *http.Request) (tierBody, bool) {
 
 // CreateTier handles POST /admin/tiers
 func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	body, ok := decodeTierBody(w, r)
 	if !ok {
 		return
@@ -108,10 +104,6 @@ func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
 // existing tier, then reloads the pool so the new limits take effect immediately
 // for keys already in that tier.
 func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	body, ok := decodeTierBody(w, r)
 	if !ok {
 		return
@@ -149,11 +141,6 @@ func (s *Server) UpdateTierFeatures(w http.ResponseWriter, r *http.Request) {
 
 // ListTiers handles GET /admin/tiers
 func (s *Server) ListTiers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	ctx := r.Context()
 	tiers, err := s.DB.GetAllTiers(ctx)
 	if err != nil {

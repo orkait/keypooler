@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/crypto"
@@ -32,18 +31,8 @@ func (s *Server) HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 // Health handles GET /admin/health
 func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pool_size":  s.Pool.PoolSize(),
 		"encryption": s.Sealer.Enabled(),
 	})
-}
-
-// extractPathParam returns the path segment right after prefix.
-func extractPathParam(path, prefix string) string {
-	segment, _, _ := strings.Cut(strings.TrimPrefix(path, prefix), "/")
-	return segment
 }

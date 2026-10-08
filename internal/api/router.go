@@ -1,85 +1,37 @@
 package api
 
-import (
-	"net/http"
-	"strings"
-)
+import "net/http"
 
-// NewRouter creates the HTTP mux with all keypooler routes.
+// pathID is the {id} wildcard in the routes below, read with r.PathValue.
+const pathID = "id"
+
+// NewRouter creates the HTTP mux with all keypooler routes. Each pattern names
+// its method, so the mux answers any other method with 405 before a handler runs.
 func NewRouter(srv *Server) http.Handler {
 	mux := http.NewServeMux()
 
-	// Public
-	mux.HandleFunc("/health", srv.HealthCheck)
+	mux.HandleFunc("GET /health", srv.HealthCheck)
 
-	// Key acquisition: admin-OR-consumer auth handled inside GetKey
-	// (resolveKeyCaller), NOT AdminAuth, so consumer tokens are accepted.
-	mux.Handle("/key", http.HandlerFunc(srv.GetKey))
-	// POST /key/{id}/exhausted: same admin-OR-consumer auth, scope-checked inside.
-	mux.Handle("/key/", http.HandlerFunc(srv.ExhaustKey))
+	// Admin-OR-consumer auth is resolved inside these two (resolveKeyCaller), not
+	// by AdminAuth, so consumer tokens are accepted.
+	mux.HandleFunc("GET /key", srv.GetKey)
+	mux.HandleFunc("POST /key/{id}/exhausted", srv.ExhaustKey)
 
-	// Admin (admin-token only). A write clears the consumer auth cache.
+	// Admin-token only. A write clears the consumer auth cache.
 	authorized := AdminAuth(srv.Cfg.AdminToken, srv.Logger)
-	admin := func(h http.Handler) http.Handler { return authorized(srv.Auth.clearAfterWrite(h)) }
-	mux.Handle("/admin/tiers", admin(http.HandlerFunc(srv.routeTiers)))
-	mux.Handle("/admin/keys", admin(http.HandlerFunc(srv.routeKeys)))
-	mux.Handle("/admin/keys/", admin(http.HandlerFunc(srv.DeleteKey)))
-	mux.Handle("/admin/health", admin(http.HandlerFunc(srv.Health)))
-	mux.Handle("/admin/consumers", admin(http.HandlerFunc(srv.routeConsumers)))
-	mux.Handle("/admin/consumers/", admin(http.HandlerFunc(srv.routeConsumerByID)))
-	mux.Handle("/admin/usage", admin(http.HandlerFunc(srv.ListUsageEvents)))
+	admin := func(h http.HandlerFunc) http.Handler { return authorized(srv.Auth.clearAfterWrite(h)) }
+	mux.Handle("GET /admin/tiers", admin(srv.ListTiers))
+	mux.Handle("POST /admin/tiers", admin(srv.CreateTier))
+	mux.Handle("PATCH /admin/tiers", admin(srv.UpdateTierFeatures))
+	mux.Handle("GET /admin/keys", admin(srv.ListKeys))
+	mux.Handle("POST /admin/keys", admin(srv.AddKey))
+	mux.Handle("DELETE /admin/keys/{id}", admin(srv.DeleteKey))
+	mux.Handle("GET /admin/health", admin(srv.Health))
+	mux.Handle("GET /admin/consumers", admin(srv.ListConsumers))
+	mux.Handle("POST /admin/consumers", admin(srv.CreateConsumer))
+	mux.Handle("DELETE /admin/consumers/{id}", admin(srv.DeleteConsumer))
+	mux.Handle("POST /admin/consumers/{id}/scopes", admin(srv.AddConsumerScope))
+	mux.Handle("GET /admin/usage", admin(srv.ListUsageEvents))
 
 	return RequestLogger(srv.Logger)(mux)
-}
-
-func (s *Server) routeTiers(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.ListTiers(w, r)
-	case http.MethodPost:
-		s.CreateTier(w, r)
-	case http.MethodPatch:
-		s.UpdateTierFeatures(w, r)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-func (s *Server) routeKeys(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.ListKeys(w, r)
-	case http.MethodPost:
-		s.AddKey(w, r)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-// routeConsumers handles the collection endpoint /admin/consumers.
-func (s *Server) routeConsumers(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.ListConsumers(w, r)
-	case http.MethodPost:
-		s.CreateConsumer(w, r)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-// routeConsumerByID dispatches /admin/consumers/{id} and
-// /admin/consumers/{id}/scopes. ServeMux strips nothing here, so the path tail
-// after the prefix decides the action.
-func (s *Server) routeConsumerByID(w http.ResponseWriter, r *http.Request) {
-	tail := strings.TrimPrefix(r.URL.Path, "/admin/consumers/")
-	if strings.HasSuffix(tail, "/scopes") {
-		s.AddConsumerScope(w, r)
-		return
-	}
-	if r.Method == http.MethodDelete {
-		s.DeleteConsumer(w, r)
-		return
-	}
-	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
