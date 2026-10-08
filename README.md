@@ -6,7 +6,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![CGO free](https://img.shields.io/badge/CGO-free-00ADD8?logo=go&logoColor=white)](#-tech)
-[![Turso](https://img.shields.io/badge/Turso-libSQL-4FF8D2?logo=sqlite&logoColor=black)](https://turso.tech)
+[![Postgres](https://img.shields.io/badge/Postgres-pgx-4169E1?logo=postgresql&logoColor=white)](https://github.com/jackc/pgx)
 [![Deployed on Railway](https://img.shields.io/badge/deployed%20on-Railway-0B0D0E?logo=railway&logoColor=white)](https://railway.app)
 
 </div>
@@ -72,7 +72,19 @@ flowchart LR
 | `consumer_scopes` | which tiers a consumer may draw from |
 | `usage_events` | append-only audit, one row per serve |
 
-Migrations are a single consolidated `migrations/001_init.sql` (destructive DROP+CREATE). FK enforcement is off on SQLite/libSQL, so deletes do explicit transactional child cleanup.
+Migrations are a single consolidated `migrations/001_init.sql`, idempotent (`CREATE ... IF NOT EXISTS`). Deletes also clean up children explicitly, in one transaction, so a reused id can never re-grant an old scope.
+</details>
+
+<details>
+<summary>⚡ <b>The serve path</b>: no database round trip</summary>
+
+| On every `/key` | Where it lives |
+|---|---|
+| Keys, tiers, rate windows, usage gates | in memory, loaded at boot and on admin writes (`internal/keypool`) |
+| Consumer token to its scopes | in memory for a minute; any admin write clears it, so a revocation holds on the next call (`internal/api/authcache.go`) |
+| Usage counts and audit events | queued, then written every second and on shutdown: counts coalesced per key, events in one `COPY` (`internal/writeback`). A crash loses at most a second of them; a database outage keeps up to 10,000 events for the next flush |
+
+Measured locally against Postgres 17: 2,000 consumer draws over one keep-alive connection at p50 0.028 ms, p99 0.081 ms; the 2,001 serves landed as `usage_count = 2001` and 2,001 audit rows.
 </details>
 
 ## 🔐 Encryption (opt-in, plaintext default)
@@ -94,10 +106,10 @@ The decision lives in one place (`crypto.Sealer`). Callers always receive the pl
 export ADMIN_TOKEN=$(openssl rand -hex 32)
 # optional: export ENCRYPTION_KEY=$(openssl rand -hex 32)   # omit for plaintext at rest
 
-mkdir -p data
+docker compose up -d postgres                  # local Postgres on 127.0.0.1:5432
+export DATABASE_URL=postgres://keypooler:keypooler@127.0.0.1:5432/keypooler
 go build -o keypooler ./cmd/keypooler          # pure Go, no CGO
-./keypooler                                    # local SQLite at ./data/pool.db
-# or: DATABASE_URL="libsql://<host>?authToken=<jwt>" ./keypooler   # Turso
+./keypooler
 ```
 
 <details>
@@ -161,12 +173,12 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 |---|---|---|
 | `ADMIN_TOKEN` | *(required)* | superuser bearer token |
 | `ENCRYPTION_KEY` | *(empty = plaintext)* | 32-byte hex; when set, new writes are encrypted |
-| `DATABASE_URL` | *(empty)* | `libsql://…` Turso URL; set ⇒ Turso, unset ⇒ local SQLite |
-| `DB_PATH` | `./data/pool.db` | local SQLite path |
-| `DB_BUSY_TIMEOUT_MS` | `5000` | local SQLite busy timeout |
+| `DATABASE_URL` | *(required)* | `postgres://user:pass@host:5432/db` |
+| `DB_MAX_OPEN_CONNS` | `4` | pool size; the serve path uses none, so admin and flushes are all it serves |
 | `SERVER_PORT` | `8080` | listen port |
 | `SERVER_{READ,WRITE,IDLE,SHUTDOWN}_TIMEOUT_SECONDS` | `30/30/120/30` | HTTP server timeouts |
-| `LOG_LEVEL` `LOG_FORMAT` `LOG_REQUESTS` | `info` `json` `true` | logging |
+| `LOG_LEVEL` `LOG_FORMAT` | `info` `json` | logging |
+| `LOG_REQUESTS` | `false` | a log line per request; every serve is already a `usage_events` row |
 </details>
 
 ## 🗂️ Project structure
@@ -177,22 +189,26 @@ internal/
   api/                   handlers, router, middleware, consumer auth
   config/                env config + validation
   crypto/                AES-256-GCM + Sealer (opt-in, self-tagged)
-  db/                    libSQL (Turso) + local SQLite adapter, migrations
+  db/                    Postgres adapter (pgx pool), migrations
   keypool/               round-robin pool, rate + usage budgets
   util/                  db context helpers
+  writeback/             usage counts and audit events, flushed behind the serve
 migrations/001_init.sql  consolidated schema
 ```
 
 ## 🚢 Deployment
 
-Runs on **Railway** as service `keypooler` in the `orkait/keypooler` project, with a **Turso** libSQL database (`orkait-eu` group, Ireland).
+Runs on **Railway** as service `keypooler` in the `platform` project (Singapore), built from `main`, beside ai-gateway and the shared Postgres it uses (database `keypooler`, reached over the private network). Infrastructure is `orkait/infra` `terraform/platform`.
+
+A schema change is a new `migrations/NNN_name.sql`; an applied version is never re-run.
+
+Tests need a throwaway Postgres (the db tests drop their own tables):
 
 ```bash
-railway up --service keypooler --detach        # from repo root
+docker compose up -d postgres
+KEYPOOLER_TEST_DATABASE_URL=postgres://keypooler:keypooler@127.0.0.1:5432/keypooler go test -race ./...
 ```
-
-Editing `migrations/001_init.sql` does **not** re-migrate an existing DB - the migration version stays `1` and is skipped. To apply a schema change, wipe the database first (drop all tables incl. `schema_migrations`) so the migration re-runs.
 
 ## 🧰 Tech
 
-Go 1.25 (CGO-free, fully static binary) · [Turso](https://turso.tech)/libSQL + [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (both pure Go) · AES-256-GCM · zerolog · stdlib `net/http` · distroless runtime image.
+Go 1.25 (CGO-free, fully static binary) · Postgres via [pgx](https://github.com/jackc/pgx) (native protocol, cached prepared statements) · AES-256-GCM · zerolog · stdlib `net/http` · distroless runtime image.

@@ -3,19 +3,26 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"strings"
+)
+
+const (
+	LogFormatJSON   = "json"
+	LogFormatPretty = "pretty"
+	defaultLogLevel = "info"
 )
 
 var (
 	ValidLogLevels = map[string]bool{
-		"debug": true,
-		"info":  true,
-		"warn":  true,
-		"error": true,
+		"debug":         true,
+		defaultLogLevel: true,
+		"warn":          true,
+		"error":         true,
 	}
 
 	ValidLogFormats = map[string]bool{
-		"json":   true,
-		"pretty": true,
+		LogFormatJSON:   true,
+		LogFormatPretty: true,
 	}
 )
 
@@ -31,6 +38,15 @@ func validateEncryptionKey(key string) error {
 	}
 	if _, err := hex.DecodeString(key); err != nil {
 		return fmt.Errorf("ENCRYPTION_KEY must be valid hex: %w", err)
+	}
+	return nil
+}
+
+// validateDatabaseURL requires a Postgres URL. The URL itself is never echoed: it
+// carries the password.
+func validateDatabaseURL(url string) error {
+	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
+		return fmt.Errorf("DATABASE_URL must be a postgres:// URL")
 	}
 	return nil
 }

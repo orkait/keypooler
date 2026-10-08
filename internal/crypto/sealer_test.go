@@ -77,19 +77,39 @@ func TestSealerEncryptedOpensPlaintext(t *testing.T) {
 
 // A tagged value with no key configured must be a hard error, never silently
 // served as ciphertext.
-func TestSealerTaggedWithoutKeyErrors(t *testing.T) {
-	plain, _ := NewSealer("")
-	if _, err := plain.Open(GCMPrefix + "deadbeef"); err == nil {
-		t.Fatal("opening an encrypted value with no key must error")
+// sealedByEarlierCode is "fc-secret" under testKeyHex, written by the per-call
+// Encrypt this package used before the Sealer held its own AEAD. Stored keys in
+// production were sealed that way and must keep opening.
+const sealedByEarlierCode = GCMPrefix + "e114eeeafe68ad08568d25f37a6e35b63d05ad79080690ba4c453542e9a84b7f578400eb50"
+
+func TestAValueSealedByEarlierCodeStillOpens(t *testing.T) {
+	s, _ := NewSealer(testKeyHex)
+	got, err := s.Open(sealedByEarlierCode)
+	if err != nil || got != "fc-secret" {
+		t.Fatalf("got %q err %v", got, err)
 	}
 }
 
-func TestSealerWrongKeyFails(t *testing.T) {
-	s, _ := NewSealer(testKeyHex)
-	sealed, _ := s.Seal("fc-secret")
-	other, _ := NewSealer("ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100")
-	if _, err := other.Open(sealed); err == nil {
-		t.Fatal("decrypting with the wrong key must fail the GCM auth tag")
+func TestSealerOpenRefusesWhatItCannotTrust(t *testing.T) {
+	keyed, _ := NewSealer(testKeyHex)
+	sealed, _ := keyed.Seal("fc-secret")
+	plain, _ := NewSealer("")
+	otherKey, _ := NewSealer("ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100")
+	cases := map[string]struct {
+		sealer *Sealer
+		stored string
+	}{
+		"tagged-without-a-key": {plain, sealed},
+		"wrong-key":            {otherKey, sealed},
+		"shorter-than-a-nonce": {keyed, GCMPrefix + "deadbeef"},
+		"not-hex":              {keyed, GCMPrefix + "zz"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := c.sealer.Open(c.stored); err == nil {
+				t.Fatal("must refuse")
+			}
+		})
 	}
 }
 
@@ -99,5 +119,22 @@ func TestNewSealerRejectsBadKey(t *testing.T) {
 	}
 	if _, err := NewSealer("00112233"); err == nil {
 		t.Fatal("short key must error")
+	}
+}
+
+func BenchmarkSealerOpen(b *testing.B) {
+	s, err := NewSealer(strings.Repeat("ab", 32))
+	if err != nil {
+		b.Fatal(err)
+	}
+	stored, err := s.Seal("sk-live-0123456789abcdef")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := s.Open(stored); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

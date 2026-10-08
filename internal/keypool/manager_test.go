@@ -2,65 +2,137 @@ package keypool
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/orkait/keypooler/internal/db"
+	"github.com/orkait/keypooler/internal/writeback"
 
 	"github.com/rs/zerolog"
 )
 
-// noopDB is a no-op DBAdapter; IncrementUsage and ResetUsageWindow are exercised
-// (counted) by the usage/window tests.
-type noopDB struct {
-	mu    sync.Mutex
-	inc   int
-	reset int
+// fakeStore is the database as the pool and its writeback see it: keys and their
+// tiers' features to load, and counts of what is read and written back.
+type fakeStore struct {
+	mu       sync.Mutex
+	keys     []*db.Key
+	features map[string][]*db.TierFeature
+	reads    int
+	inc      int
+	reset    int
 }
 
-func (n *noopDB) Close() error                                                       { return nil }
-func (n *noopDB) CreateTier(context.Context, *db.Tier) error                         { return nil }
-func (n *noopDB) GetTier(context.Context, string) (*db.Tier, error)                  { return nil, nil }
-func (n *noopDB) GetTierByName(context.Context, string) (*db.Tier, error)            { return nil, nil }
-func (n *noopDB) GetAllTiers(context.Context) ([]*db.Tier, error)                    { return nil, nil }
-func (n *noopDB) DeleteTier(context.Context, string) error                           { return nil }
-func (n *noopDB) UpdateTierDescription(context.Context, string, string) error        { return nil }
-func (n *noopDB) SetTierFeatures(context.Context, string, []*db.TierFeature) error   { return nil }
-func (n *noopDB) GetTierFeatures(context.Context, string) ([]*db.TierFeature, error) { return nil, nil }
-func (n *noopDB) CreateKey(context.Context, *db.Key) error                           { return nil }
-func (n *noopDB) GetKey(context.Context, string) (*db.Key, error)                    { return nil, nil }
-func (n *noopDB) GetAllKeys(context.Context) ([]*db.Key, error)                      { return nil, nil }
-func (n *noopDB) GetKeysByTier(context.Context, string) ([]*db.Key, error)           { return nil, nil }
-func (n *noopDB) DeleteKey(context.Context, string) error                            { return nil }
-func (n *noopDB) SetKeyActive(context.Context, string, bool) error                   { return nil }
-func (n *noopDB) SetKeyExhausted(context.Context, string, time.Time) error           { return nil }
-func (n *noopDB) GetKeySecrets(context.Context, string) ([]*db.KeySecret, error)     { return nil, nil }
-func (n *noopDB) SetKeySecrets(context.Context, string, []*db.KeySecret) error       { return nil }
-func (n *noopDB) CreateConsumer(context.Context, *db.Consumer) error                 { return nil }
-func (n *noopDB) GetConsumerByTokenHash(context.Context, string) (*db.Consumer, error) {
+func (f *fakeStore) GetAllKeys(context.Context) ([]*db.Key, error) {
+	f.reads++
+	return f.keys, nil
+}
+
+func (f *fakeStore) TierFeaturesByTier(context.Context) (map[string][]*db.TierFeature, error) {
+	f.reads++
+	return f.features, nil
+}
+
+func (f *fakeStore) KeySecretsByKey(context.Context) (map[string][]*db.KeySecret, error) {
+	f.reads++
 	return nil, nil
 }
-func (n *noopDB) GetAllConsumers(context.Context) ([]*db.Consumer, error)        { return nil, nil }
-func (n *noopDB) DeleteConsumer(context.Context, string) error                   { return nil }
-func (n *noopDB) AddConsumerScope(context.Context, string, string) error         { return nil }
-func (n *noopDB) GetConsumerScopes(context.Context, string) ([]string, error)    { return nil, nil }
-func (n *noopDB) RecordUsageEvent(context.Context, string, string, string) error { return nil }
-func (n *noopDB) ListUsageEvents(context.Context, int) ([]*db.UsageEvent, error) {
-	return nil, nil
-}
-func (n *noopDB) IncrementUsage(context.Context, string) error {
-	n.mu.Lock()
-	n.inc++
-	n.mu.Unlock()
+
+func (f *fakeStore) SetKeyExhausted(context.Context, string, time.Time) error { return nil }
+
+func (f *fakeStore) RecordUsageEvents(context.Context, []*db.UsageEvent) error { return nil }
+
+func (f *fakeStore) AddUsage(_ context.Context, _ string, count int) error {
+	f.mu.Lock()
+	f.inc += count
+	f.mu.Unlock()
 	return nil
 }
-func (n *noopDB) ResetUsageWindow(context.Context, string, time.Time) error {
-	n.mu.Lock()
-	n.reset++
-	n.mu.Unlock()
+
+func (f *fakeStore) ResetUsageWindow(context.Context, string, time.Time, int) error {
+	f.mu.Lock()
+	f.reset++
+	f.mu.Unlock()
 	return nil
+}
+
+func TestAReloadRefreshesAKeysFieldsAndKeepsItsRateWindow(t *testing.T) {
+	store := &fakeStore{
+		keys: []*db.Key{{ID: "k", Name: "before", TierID: "t", IsActive: true}},
+		features: map[string][]*db.TierFeature{
+			"t": {{TierID: "t", Feature: "chat", RateLimit: 1, WindowSeconds: 60}},
+		},
+	}
+	m := &Manager{rr: NewRoundRobin(), dbAdap: store, logger: zerolog.Nop()}
+	if err := m.ReloadKeys(); err != nil {
+		t.Fatal(err)
+	}
+	if m.GetKeyForFeature("chat", nil) == nil {
+		t.Fatal("first draw within the rate limit must serve")
+	}
+
+	store.keys = []*db.Key{{ID: "k", Name: "after", TierID: "t", IsActive: true}}
+	if err := m.ReloadKeys(); err != nil {
+		t.Fatal(err)
+	}
+	if m.GetKeyForFeature("chat", nil) != nil {
+		t.Fatal("a reload must not reset the rate window: the second draw is over the limit")
+	}
+	if got := m.GetHealthStatus()[0].Name; got != "after" {
+		t.Fatalf("name after reload %q, want %q", got, "after")
+	}
+	if m.keys[0].Secrets == nil {
+		t.Fatal("a key without secrets must load an empty map, which a draw answers as {}")
+	}
+}
+
+func TestAReloadKeepsServesTheDatabaseHasNotSeenYet(t *testing.T) {
+	window := 3600
+	for name, windowSeconds := range map[string]*int{"lifetime": nil, "windowed": &window} {
+		t.Run(name, func(t *testing.T) {
+			limit := 2
+			store := &fakeStore{
+				keys:     []*db.Key{{ID: "k", TierID: "t", IsActive: true, UsageLimit: &limit, UsageWindowSeconds: windowSeconds}},
+				features: map[string][]*db.TierFeature{"t": {{TierID: "t", Feature: "chat", RateLimit: 10, WindowSeconds: 60}}},
+			}
+			m := &Manager{rr: NewRoundRobin(), dbAdap: store, usage: writeback.New(store, zerolog.Nop()), logger: zerolog.Nop()}
+			if err := m.ReloadKeys(); err != nil {
+				t.Fatal(err)
+			}
+			if m.GetKeyForFeature("chat", nil) == nil {
+				t.Fatal("first serve refused")
+			}
+			if err := m.ReloadKeys(); err != nil {
+				t.Fatal(err)
+			}
+			if m.GetKeyForFeature("chat", nil) == nil {
+				t.Fatal("second serve refused")
+			}
+			if m.GetKeyForFeature("chat", nil) != nil {
+				t.Fatal("the reload forgot an unflushed serve: the key served past its limit")
+			}
+		})
+	}
+}
+
+func TestAReloadReadsKeysFeaturesAndSecretsOnceHoweverManyKeys(t *testing.T) {
+	store := &fakeStore{features: map[string][]*db.TierFeature{
+		"served": {{TierID: "served", Feature: "chat", RateLimit: 10, WindowSeconds: 60}},
+	}}
+	for i := range 50 {
+		store.keys = append(store.keys, &db.Key{ID: fmt.Sprint(i), TierID: "served", IsActive: true})
+	}
+	store.keys = append(store.keys, &db.Key{ID: "orphan", TierID: "featureless", IsActive: true})
+	m := &Manager{rr: NewRoundRobin(), dbAdap: store, logger: zerolog.Nop()}
+
+	if err := m.ReloadKeys(); err != nil {
+		t.Fatal(err)
+	}
+	if store.reads != 3 || m.PoolSize() != 50 {
+		t.Fatalf("reads %d, want 3; pool %d, want 50 (the featureless tier's key skipped)", store.reads, m.PoolSize())
+	}
 }
 
 // A usage-limited key under heavy concurrency must be served EXACTLY usage_limit
@@ -74,11 +146,12 @@ func TestUsageLimitNoOverServeUnderConcurrency(t *testing.T) {
 		UsageLimit: &limit,
 		Features:   map[string]FeatureLimit{"f": {RateLimit: 100000, WindowSeconds: 60}},
 	}
-	fake := &noopDB{}
+	fake := &fakeStore{}
 	m := &Manager{
 		keys:   []*PoolKey{key},
 		rr:     NewRoundRobin(),
 		dbAdap: fake,
+		usage:  writeback.New(fake, zerolog.Nop()),
 		logger: zerolog.Nop(),
 	}
 
@@ -98,8 +171,12 @@ func TestUsageLimitNoOverServeUnderConcurrency(t *testing.T) {
 	if served != int32(limit) {
 		t.Fatalf("usage over/under-served: got %d, want exactly %d", served, limit)
 	}
+	if fake.inc != 0 {
+		t.Fatalf("a serve wrote to the database on the request path: %d", fake.inc)
+	}
+	m.usage.Flush(context.Background())
 	if fake.inc != limit {
-		t.Fatalf("usage not persisted exactly per serve: IncrementUsage called %d times, want %d", fake.inc, limit)
+		t.Fatalf("usage not persisted exactly per serve: %d persisted, want %d", fake.inc, limit)
 	}
 }
 
@@ -112,7 +189,7 @@ func TestExpiredKeyNotServed(t *testing.T) {
 		ExpiresAt: &past,
 		Features:  map[string]FeatureLimit{"f": {RateLimit: 10, WindowSeconds: 60}},
 	}
-	m := &Manager{keys: []*PoolKey{key}, rr: NewRoundRobin(), dbAdap: &noopDB{}, logger: zerolog.Nop()}
+	m := &Manager{keys: []*PoolKey{key}, rr: NewRoundRobin(), dbAdap: &fakeStore{}, logger: zerolog.Nop()}
 	if got := m.GetKeyForFeature("f", nil); got != nil {
 		t.Fatalf("expired key was served")
 	}
@@ -131,7 +208,7 @@ func TestExhaustedKeyIsSkippedUntilItsTime(t *testing.T) {
 		IsActive: true,
 		Features: map[string]FeatureLimit{"f": {RateLimit: 10, WindowSeconds: 60}},
 	}
-	m := &Manager{keys: []*PoolKey{spent, fresh}, rr: NewRoundRobin(), dbAdap: &noopDB{}, logger: zerolog.Nop()}
+	m := &Manager{keys: []*PoolKey{spent, fresh}, rr: NewRoundRobin(), dbAdap: &fakeStore{}, logger: zerolog.Nop()}
 
 	if !m.MarkExhausted("spent", time.Now().Add(time.Hour)) {
 		t.Fatalf("known key reported unknown")
@@ -170,8 +247,8 @@ func TestUsageWindowResetResumesServing(t *testing.T) {
 		UsageWindowSeconds: &window,
 		Features:           map[string]FeatureLimit{"f": {RateLimit: 100000, WindowSeconds: 60}},
 	}
-	fake := &noopDB{}
-	m := &Manager{keys: []*PoolKey{key}, rr: NewRoundRobin(), dbAdap: fake, logger: zerolog.Nop()}
+	fake := &fakeStore{}
+	m := &Manager{keys: []*PoolKey{key}, rr: NewRoundRobin(), dbAdap: fake, usage: writeback.New(fake, zerolog.Nop()), logger: zerolog.Nop()}
 
 	// First window: exactly `limit` serves, then exhausted.
 	for i := 0; i < limit; i++ {
@@ -190,6 +267,7 @@ func TestUsageWindowResetResumesServing(t *testing.T) {
 		t.Fatalf("key should serve again after the usage window reset")
 	}
 
+	m.usage.Flush(context.Background())
 	fake.mu.Lock()
 	resets := fake.reset
 	fake.mu.Unlock()

@@ -3,6 +3,8 @@ package keypool
 import (
 	"sync"
 	"time"
+
+	"github.com/orkait/keypooler/internal/db"
 )
 
 // FeatureLimit is a per-feature rate limit with a configurable window.
@@ -41,6 +43,24 @@ type PoolKey struct {
 
 	mu           sync.Mutex
 	rateCounters map[string]*rateCounter // feature -> counter
+}
+
+// load sets the fields an admin can change. Runtime state is left as it is: the
+// rate counters, and the usage count and window, which run ahead of the database
+// by whatever writeback has not flushed yet.
+func (k *PoolKey) load(row *db.Key, features map[string]FeatureLimit, secrets map[string]string) {
+	k.ID = row.ID
+	k.Name = row.Name
+	k.KeyValue = row.KeyValue
+	k.TierID = row.TierID
+	k.IsActive = row.IsActive
+	k.ExpiresAt = row.ExpiresAt
+	k.UsageLimit = row.UsageLimit
+	k.UsageWindowSeconds = row.UsageWindowSeconds
+	k.ExhaustedUntil = row.ExhaustedUntil
+	k.Metadata = row.Metadata
+	k.Secrets = secrets
+	k.Features = features
 }
 
 type rateCounter struct {
@@ -119,7 +139,7 @@ func (k *PoolKey) Available() bool {
 // elapsed (now - UsageWindowStart >= window), the in-memory count is reset to 0
 // and the window restarts at now BEFORE the limit check. The reset is reported
 // via the returned didReset/windowStart so the caller can persist it. When
-// UsageWindowSeconds is nil the limit is a lifetime cap (the original behaviour).
+// UsageWindowSeconds is nil the limit is a lifetime cap.
 //
 // The window-check, reset, limit-check, and increment all happen in one critical
 // section under the key lock so concurrent callers cannot over-serve a limited

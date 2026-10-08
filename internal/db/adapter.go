@@ -7,12 +7,11 @@ import (
 
 // DBAdapter defines the interface for keypooler database operations.
 // Keypooler owns tiers, tier features, API keys, consumers, and usage events.
-// Executions, integrations, and dead letters are owned by pulse.
 type DBAdapter interface {
 	Close() error
 
 	// Tiers
-	CreateTier(ctx context.Context, tier *Tier) error
+	CreateTier(ctx context.Context, tier *Tier, features []*TierFeature) error
 	GetTier(ctx context.Context, id string) (*Tier, error)
 	GetTierByName(ctx context.Context, name string) (*Tier, error)
 	GetAllTiers(ctx context.Context) ([]*Tier, error)
@@ -21,25 +20,25 @@ type DBAdapter interface {
 
 	// Tier Features
 	SetTierFeatures(ctx context.Context, tierID string, features []*TierFeature) error
-	GetTierFeatures(ctx context.Context, tierID string) ([]*TierFeature, error)
+	TierFeaturesByTier(ctx context.Context) (map[string][]*TierFeature, error)
 
 	// Keys
-	CreateKey(ctx context.Context, key *Key) error
+	CreateKey(ctx context.Context, key *Key, secrets []*KeySecret) error
 	GetKey(ctx context.Context, id string) (*Key, error)
 	GetAllKeys(ctx context.Context) ([]*Key, error)
 	GetKeysByTier(ctx context.Context, tierID string) ([]*Key, error)
 	DeleteKey(ctx context.Context, id string) error
 	SetKeyActive(ctx context.Context, id string, active bool) error
-	IncrementUsage(ctx context.Context, keyID string) error
-	// ResetUsageWindow zeroes usage_count and stamps a fresh usage_window_start.
-	// Used when a key's monthly (windowed) usage budget rolls over.
-	ResetUsageWindow(ctx context.Context, keyID string, start time.Time) error
+	// AddUsage adds n serves to usage_count.
+	AddUsage(ctx context.Context, keyID string, n int) error
+	// ResetUsageWindow sets usage_count to count and stamps a fresh
+	// usage_window_start. Used when a key's monthly (windowed) budget rolls over.
+	ResetUsageWindow(ctx context.Context, keyID string, start time.Time, count int) error
 	// SetKeyExhausted keeps the key out of rotation until `until`.
 	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
 
 	// Key Secrets
-	GetKeySecrets(ctx context.Context, keyID string) ([]*KeySecret, error)
-	SetKeySecrets(ctx context.Context, keyID string, secrets []*KeySecret) error
+	KeySecretsByKey(ctx context.Context) (map[string][]*KeySecret, error)
 
 	// Consumers
 	CreateConsumer(ctx context.Context, consumer *Consumer) error
@@ -48,9 +47,10 @@ type DBAdapter interface {
 	DeleteConsumer(ctx context.Context, id string) error
 	AddConsumerScope(ctx context.Context, consumerID, tierID string) error
 	GetConsumerScopes(ctx context.Context, consumerID string) ([]string, error)
+	ConsumerScopesByConsumer(ctx context.Context) (map[string][]string, error)
 
 	// Usage Events (audit)
-	RecordUsageEvent(ctx context.Context, keyID, consumerID, feature string) error
+	RecordUsageEvents(ctx context.Context, events []*UsageEvent) error
 	ListUsageEvents(ctx context.Context, limit int) ([]*UsageEvent, error)
 }
 
@@ -93,7 +93,8 @@ type Key struct {
 	CreatedAt      time.Time
 }
 
-// KeySecret is a named secret bound to a key, stored as plaintext.
+// KeySecret is a named secret bound to a key. Value is as stored: sealed when
+// encryption is on, plaintext otherwise.
 type KeySecret struct {
 	KeyID string
 	Name  string

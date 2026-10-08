@@ -1,0 +1,89 @@
+package db
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	minConns        = 1
+	maxConnIdleTime = 5 * time.Minute
+	connectTimeout  = 10 * time.Second
+	uniqueViolation = "23505"
+)
+
+// ErrDuplicate is a write that collides with a row already holding a unique value.
+var ErrDuplicate = errors.New("already exists")
+
+// PostgresAdapter implements DBAdapter on a native pgx pool: the binary protocol and
+// a per-connection prepared-statement cache, so a repeated query is one round trip.
+type PostgresAdapter struct {
+	pool *pgxpool.Pool
+}
+
+// NewPostgresAdapter opens a pool on a postgres:// URL and checks it answers.
+func NewPostgresAdapter(dsn string, maxConns int) (*PostgresAdapter, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		// The parse error can quote the URL, password included; never wrap it.
+		return nil, fmt.Errorf("invalid DATABASE_URL")
+	}
+	if maxConns < 1 {
+		maxConns = 1
+	}
+	cfg.MaxConns = int32(maxConns)
+	cfg.MinConns = minConns
+	cfg.MaxConnIdleTime = maxConnIdleTime
+
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database pool")
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+	return &PostgresAdapter{pool: pool}, nil
+}
+
+// Pool returns the underlying pool, for migrations.
+func (a *PostgresAdapter) Pool() *pgxpool.Pool {
+	return a.pool
+}
+
+// Close closes every pooled connection.
+func (a *PostgresAdapter) Close() error {
+	a.pool.Close()
+	return nil
+}
+
+// notFound reports pgx.ErrNoRows as the caller's own "not found" error.
+func notFound(err error, what string) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%s not found", what)
+	}
+	return err
+}
+
+// duplicate reports a unique violation as ErrDuplicate.
+func duplicate(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+		return ErrDuplicate
+	}
+	return err
+}
+
+// uuidString generates a random UUID for server-assigned row identifiers.
+func uuidString() string {
+	return uuid.New().String()
+}

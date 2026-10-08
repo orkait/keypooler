@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -14,19 +15,12 @@ import (
 func AdminAuth(token string, logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			auth := r.Header.Get("Authorization")
-			if auth == "" {
-				writeError(w, http.StatusUnauthorized, "missing authorization header")
+			presented, ok := bearerToken(r)
+			if !ok {
+				writeError(w, http.StatusUnauthorized, "missing or malformed authorization header")
 				return
 			}
-
-			parts := strings.SplitN(auth, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-				writeError(w, http.StatusUnauthorized, "invalid authorization format")
-				return
-			}
-
-			if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(token)) != 1 {
+			if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) != 1 {
 				logger.Warn().Str("remote_addr", r.RemoteAddr).Msg("unauthorized admin access attempt")
 				writeError(w, http.StatusUnauthorized, "invalid admin token")
 				return
@@ -40,15 +34,11 @@ func AdminAuth(token string, logger zerolog.Logger) func(http.Handler) http.Hand
 // bearerToken extracts the token from a "Bearer <token>" Authorization header.
 // Returns ("", false) when the header is missing or malformed.
 func bearerToken(r *http.Request) (string, bool) {
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
+	scheme, token, ok := strings.Cut(r.Header.Get(authorizationHeader), " ")
+	if !ok || !strings.EqualFold(scheme, bearerScheme) {
 		return "", false
 	}
-	parts := strings.SplitN(auth, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-		return "", false
-	}
-	return parts[1], true
+	return token, true
 }
 
 // hashToken returns hex(sha256(token)). Used to store and look up consumer tokens
@@ -81,36 +71,48 @@ func (s *Server) resolveKeyCaller(w http.ResponseWriter, r *http.Request) (keyCa
 
 	// Admin token -> superuser. Constant-time compare against the configured token.
 	if subtle.ConstantTimeCompare([]byte(token), []byte(s.Cfg.AdminToken)) == 1 {
-		return keyCaller{isAdmin: true, consumerID: "admin", allowedTierIDs: nil}, true
+		return keyCaller{isAdmin: true, consumerID: adminConsumerID}, true
 	}
 
-	// Otherwise treat it as a consumer token: indexed lookup by sha256 hash, then
-	// a constant-time confirm of the hash to avoid a timing oracle on the index.
-	tokenHash := hashToken(token)
-	ctx := r.Context()
-	consumer, err := s.DB.GetConsumerByTokenHash(ctx, tokenHash)
+	caller, found, err := s.consumerCaller(r.Context(), hashToken(token))
 	if err != nil {
 		s.Logger.Error().Err(err).Msg("consumer lookup failed")
 		writeError(w, http.StatusInternalServerError, "auth lookup failed")
 		return keyCaller{}, false
 	}
-	if consumer == nil || subtle.ConstantTimeCompare([]byte(consumer.TokenHash), []byte(tokenHash)) != 1 {
+	if !found {
 		s.Logger.Warn().Str("remote_addr", r.RemoteAddr).Msg("unauthorized /key access attempt")
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		return keyCaller{}, false
 	}
+	return caller, true
+}
 
+// consumerCaller resolves a consumer token's hash to its caller: from memory when
+// seen recently, else by an indexed lookup confirmed in constant time (no timing
+// oracle on the index) and the consumer's scopes.
+func (s *Server) consumerCaller(ctx context.Context, tokenHash string) (keyCaller, bool, error) {
+	if caller, ok := s.Auth.get(tokenHash); ok {
+		return caller, true, nil
+	}
+	consumer, err := s.DB.GetConsumerByTokenHash(ctx, tokenHash)
+	if err != nil {
+		return keyCaller{}, false, err
+	}
+	if consumer == nil || subtle.ConstantTimeCompare([]byte(consumer.TokenHash), []byte(tokenHash)) != 1 {
+		return keyCaller{}, false, nil
+	}
 	scopeIDs, err := s.DB.GetConsumerScopes(ctx, consumer.ID)
 	if err != nil {
-		s.Logger.Error().Err(err).Str("consumer_id", consumer.ID).Msg("consumer scope lookup failed")
-		writeError(w, http.StatusInternalServerError, "auth lookup failed")
-		return keyCaller{}, false
+		return keyCaller{}, false, err
 	}
 	allowed := make(map[string]bool, len(scopeIDs))
 	for _, id := range scopeIDs {
 		allowed[id] = true
 	}
-	return keyCaller{isAdmin: false, consumerID: consumer.ID, allowedTierIDs: allowed}, true
+	caller := keyCaller{consumerID: consumer.ID, allowedTierIDs: allowed}
+	s.Auth.put(tokenHash, caller)
+	return caller, true, nil
 }
 
 // RequestLogger middleware logs each incoming request.

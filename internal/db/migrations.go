@@ -1,163 +1,131 @@
 package db
 
 import (
+	"cmp"
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Migration represents a single database migration
-type Migration struct {
-	Version  int
-	Name     string
-	Filename string
-	SQL      string
+const migrationSuffix = ".sql"
+
+// migration is one numbered SQL file.
+type migration struct {
+	version int
+	name    string
+	sql     string
 }
 
 // RunMigrations executes all pending migrations in order
-func RunMigrations(ctx context.Context, db *sql.DB, migrationsPath string) error {
-	// Create migrations tracking table if it doesn't exist
-	if err := createMigrationsTable(ctx, db); err != nil {
+func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsPath string) error {
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`); err != nil {
 		return fmt.Errorf("failed to create migrations table: %w", err)
 	}
 
-	// Load all migrations from filesystem
 	migrations, err := loadMigrations(migrationsPath)
 	if err != nil {
 		return fmt.Errorf("failed to load migrations: %w", err)
 	}
 
-	// Get already applied migrations
-	applied, err := getAppliedMigrations(ctx, db)
+	applied, err := getAppliedMigrations(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("failed to get applied migrations: %w", err)
 	}
 
-	// Execute pending migrations
-	for _, migration := range migrations {
-		if applied[migration.Version] {
-			continue // Already applied
+	for _, m := range migrations {
+		if applied[m.version] {
+			continue
 		}
-
-		if err := executeMigration(ctx, db, migration); err != nil {
-			return fmt.Errorf("failed to execute migration %d (%s): %w", migration.Version, migration.Name, err)
+		if err := executeMigration(ctx, pool, m); err != nil {
+			return fmt.Errorf("failed to execute migration %d (%s): %w", m.version, m.name, err)
 		}
 	}
-
 	return nil
 }
 
-// createMigrationsTable creates the schema_migrations table
-func createMigrationsTable(ctx context.Context, db *sql.DB) error {
-	query := `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version INTEGER PRIMARY KEY,
-			name TEXT NOT NULL,
-			applied_at TIMESTAMP NOT NULL DEFAULT (datetime('now'))
-		)
-	`
-	_, err := db.ExecContext(ctx, query)
-	return err
-}
-
-// loadMigrations reads all migration files from the filesystem
-func loadMigrations(migrationsPath string) ([]Migration, error) {
-	entries, err := os.ReadDir(migrationsPath)
+// loadMigrations reads every migration file in dir, in version order.
+func loadMigrations(dir string) ([]migration, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read migrations directory: %w", err)
 	}
 
-	var migrations []Migration
+	var migrations []migration
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), migrationSuffix) {
 			continue
 		}
-
-		// Parse version from filename (e.g., "001_create_api_keys.sql" -> version 1)
-		var version int
-		var name string
-		filename := entry.Name()
-		parts := strings.SplitN(filename, "_", 2)
-		if len(parts) < 2 {
-			return nil, fmt.Errorf("invalid migration filename format: %s (expected NNN_name.sql)", filename)
-		}
-
-		if _, err := fmt.Sscanf(parts[0], "%d", &version); err != nil {
-			return nil, fmt.Errorf("failed to parse version from %s: %w", filename, err)
-		}
-
-		name = strings.TrimSuffix(parts[1], ".sql")
-
-		// Read migration SQL
-		sqlBytes, err := os.ReadFile(filepath.Join(migrationsPath, filename))
+		version, name, err := parseMigrationName(entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("failed to read migration %s: %w", filename, err)
+			return nil, err
 		}
-
-		migrations = append(migrations, Migration{
-			Version:  version,
-			Name:     name,
-			Filename: filename,
-			SQL:      string(sqlBytes),
-		})
+		sql, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read migration %s: %w", entry.Name(), err)
+		}
+		migrations = append(migrations, migration{version: version, name: name, sql: string(sql)})
 	}
 
-	// Sort by version
-	sort.Slice(migrations, func(i, j int) bool {
-		return migrations[i].Version < migrations[j].Version
-	})
-
+	slices.SortFunc(migrations, func(a, b migration) int { return cmp.Compare(a.version, b.version) })
 	return migrations, nil
 }
 
+// parseMigrationName reads "001_init.sql" as version 1 named "init".
+func parseMigrationName(filename string) (int, string, error) {
+	prefix, name, ok := strings.Cut(strings.TrimSuffix(filename, migrationSuffix), "_")
+	version, err := strconv.Atoi(prefix)
+	if !ok || err != nil || name == "" {
+		return 0, "", fmt.Errorf("invalid migration filename %s (expected NNN_name%s)", filename, migrationSuffix)
+	}
+	return version, name, nil
+}
+
 // getAppliedMigrations returns a set of already applied migration versions
-func getAppliedMigrations(ctx context.Context, db *sql.DB) (map[int]bool, error) {
-	query := `SELECT version FROM schema_migrations`
-	rows, err := db.QueryContext(ctx, query)
+func getAppliedMigrations(ctx context.Context, pool *pgxpool.Pool) (map[int]bool, error) {
+	rows, err := pool.Query(ctx, "SELECT version FROM schema_migrations")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	applied := make(map[int]bool)
-	for rows.Next() {
-		var version int
-		if err := rows.Scan(&version); err != nil {
-			return nil, err
-		}
-		applied[version] = true
+	versions, err := pgx.CollectRows(rows, pgx.RowTo[int])
+	if err != nil {
+		return nil, err
 	}
-
-	return applied, rows.Err()
+	applied := make(map[int]bool, len(versions))
+	for _, v := range versions {
+		applied[v] = true
+	}
+	return applied, nil
 }
 
-// executeMigration runs a single migration within a transaction
-func executeMigration(ctx context.Context, db *sql.DB, migration Migration) error {
-	tx, err := db.BeginTx(ctx, nil)
+// executeMigration runs a single migration within a transaction. The file may hold
+// several statements, so it goes over the simple protocol, which takes them as one.
+func executeMigration(ctx context.Context, pool *pgxpool.Pool, m migration) error {
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
-	// Execute the migration SQL
-	if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
+	if _, err := tx.Conn().PgConn().Exec(ctx, m.sql).ReadAll(); err != nil {
 		return fmt.Errorf("failed to execute SQL: %w", err)
 	}
-
-	// Record the migration as applied
-	recordQuery := `INSERT INTO schema_migrations (version, name) VALUES (?, ?)`
-	if _, err := tx.ExecContext(ctx, recordQuery, migration.Version, migration.Name); err != nil {
+	if _, err := tx.Exec(ctx,
+		"INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
+		m.version, m.name,
+	); err != nil {
 		return fmt.Errorf("failed to record migration: %w", err)
 	}
-
-	// Commit transaction
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	return nil
+	return tx.Commit(ctx)
 }
