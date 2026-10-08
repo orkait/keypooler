@@ -189,9 +189,6 @@ func featureLimits(byTier map[string][]*db.TierFeature) map[string]map[string]Fe
 // encrypted are decrypted, plaintext values pass through) into a name->value map.
 // Open failures are logged without the value and skipped.
 func (m *Manager) openSecrets(keyID string, rows []*db.KeySecret) map[string]string {
-	if len(rows) == 0 {
-		return nil
-	}
 	secrets := make(map[string]string, len(rows))
 	for _, s := range rows {
 		plain, derr := m.sealer.Open(s.Value)

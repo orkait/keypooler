@@ -83,6 +83,9 @@ func TestAReloadRefreshesAKeysFieldsAndKeepsItsRateWindow(t *testing.T) {
 	if got := m.GetHealthStatus()[0].Name; got != "after" {
 		t.Fatalf("name after reload %q, want %q", got, "after")
 	}
+	if m.keys[0].Secrets == nil {
+		t.Fatal("a key without secrets must load an empty map, which a draw answers as {}")
+	}
 }
 
 func TestAReloadKeepsServesTheDatabaseHasNotSeenYet(t *testing.T) {

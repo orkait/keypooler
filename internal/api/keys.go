@@ -53,22 +53,11 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 
 	s.Usage.Event(db.NewUsageEvent(key.ID, caller.consumerID, feature))
 
-	// Secrets are opened on load by the manager; return them at this trusted
-	// boundary alongside the key value and metadata.
-	secrets := key.Secrets
-	if secrets == nil {
-		secrets = map[string]string{}
-	}
-	metadata := key.Metadata
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"key_id":   key.ID,
 		"value":    value,
-		"metadata": metadata,
-		"secrets":  secrets,
+		"metadata": key.Metadata,
+		"secrets":  key.Secrets,
 	})
 }
 
@@ -198,14 +187,6 @@ func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 				"window_seconds": info.WindowSeconds,
 			}
 		}
-		metadata := ks.Metadata
-		if metadata == nil {
-			metadata = map[string]any{}
-		}
-		secretNames := ks.SecretNames
-		if secretNames == nil {
-			secretNames = []string{}
-		}
 		result[i] = map[string]any{
 			"id":              ks.ID,
 			"name":            ks.Name,
@@ -215,8 +196,8 @@ func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 			"exhausted_until": rfc3339OrNil(ks.ExhaustedUntil),
 			"usage_limit":     ks.UsageLimit,
 			"usage_count":     ks.UsageCount,
-			"metadata":        metadata,
-			"secret_names":    secretNames,
+			"metadata":        ks.Metadata,
+			"secret_names":    ks.SecretNames,
 			"usage":           usage,
 		}
 	}
