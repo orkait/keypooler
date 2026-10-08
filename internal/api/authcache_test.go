@@ -57,6 +57,40 @@ func resolve(t *testing.T, s *Server) (keyCaller, int) {
 	return caller, w.Code
 }
 
+func TestAKeyCallerIsTheAdminAScopedConsumerOrRefused(t *testing.T) {
+	cases := map[string]struct {
+		header   string
+		active   bool
+		admin    bool
+		consumer string
+		status   int
+	}{
+		"admin-token":      {header: "Bearer admin-token", admin: true, consumer: adminConsumerID, status: http.StatusOK},
+		"consumer-token":   {header: "Bearer " + consumerToken, active: true, consumer: "c1", status: http.StatusOK},
+		"lowercase-scheme": {header: "bearer " + consumerToken, active: true, consumer: "c1", status: http.StatusOK},
+		"unknown-token":    {header: "Bearer " + consumerToken, status: http.StatusUnauthorized},
+		"no-header":        {header: "", status: http.StatusUnauthorized},
+		"not-bearer":       {header: "Basic " + consumerToken, status: http.StatusUnauthorized},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := authServer(&consumerDB{active: c.active})
+			r := httptest.NewRequest(http.MethodGet, "/key?feature=chat", nil)
+			if c.header != "" {
+				r.Header.Set("Authorization", c.header)
+			}
+			w := httptest.NewRecorder()
+			caller, ok := s.resolveKeyCaller(w, r)
+			if ok != (c.status == http.StatusOK) || w.Code != c.status {
+				t.Fatalf("ok %v, status %d, want %d", ok, w.Code, c.status)
+			}
+			if ok && (caller.isAdmin != c.admin || caller.consumerID != c.consumer || (!c.admin && !caller.allowedTierIDs["groq_chat"])) {
+				t.Fatalf("caller %+v", caller)
+			}
+		})
+	}
+}
+
 func TestAConsumerIsLookedUpOnceThenServedFromMemory(t *testing.T) {
 	store := &consumerDB{active: true}
 	s := authServer(store)

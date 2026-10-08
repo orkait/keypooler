@@ -8,4 +8,9 @@ const (
 	maxUsageListLimit     = 1000
 	// exhaustedEvent is the audit feature name recorded when a consumer reports a key spent.
 	exhaustedEvent = "exhausted"
+	// adminConsumerID is the consumer recorded for a key drawn with the admin token.
+	adminConsumerID = "admin"
+
+	authorizationHeader = "Authorization"
+	bearerScheme        = "Bearer"
 )
