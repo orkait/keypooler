@@ -59,6 +59,6 @@ CREATE TABLE IF NOT EXISTS usage_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_keys_tier_id ON keys(tier_id);
-CREATE INDEX IF NOT EXISTS idx_consumers_token_hash ON consumers(token_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_consumers_token_hash ON consumers(token_hash);
 CREATE INDEX IF NOT EXISTS idx_usage_events_key_created ON usage_events(key_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at);

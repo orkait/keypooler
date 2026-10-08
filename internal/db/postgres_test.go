@@ -165,6 +165,9 @@ func TestConsumersScopesAreIdempotentAndInactiveNeverAuthenticates(t *testing.T)
 	if err := a.CreateConsumer(ctx, &Consumer{ID: "c2", Name: "old", TokenHash: "h2"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.CreateConsumer(ctx, &Consumer{ID: "c3", Name: "twin", TokenHash: "h1", IsActive: true}); err == nil {
+		t.Fatal("a second consumer with the same token hash must be refused")
+	}
 	for range 2 {
 		if err := a.AddConsumerScope(ctx, "c1", "t"); err != nil {
 			t.Fatal(err)
