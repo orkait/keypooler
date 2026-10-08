@@ -4,17 +4,23 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
-	"github.com/orkait/keypooler/internal/util"
 	"github.com/orkait/keypooler/internal/writeback"
 
 	"github.com/rs/zerolog"
 )
 
-// Store is what the pool reads from and writes to the database.
+const dbTimeout = 5 * time.Second
+
+var (
+	ErrOutOfScope = errors.New("no key in scope serves the feature")
+	ErrExhausted  = errors.New("no key available for feature")
+)
+
 type Store interface {
 	GetAllKeys(ctx context.Context) ([]*db.Key, error)
 	TierFeaturesByTier(ctx context.Context) (map[string][]*db.TierFeature, error)
@@ -22,43 +28,16 @@ type Store interface {
 	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
 }
 
-// Manager owns all pool keys and selects them via round-robin.
 type Manager struct {
 	mu     sync.RWMutex
 	keys   []*PoolKey
-	rr     *RoundRobin
+	next   atomic.Uint64
 	dbAdap Store
 	usage  *writeback.Writer
 	sealer *crypto.Sealer
 	logger zerolog.Logger
 }
 
-// NewManager creates a key pool manager and loads keys from the database. The
-// sealer opens (decrypts where tagged) bound secrets as keys are loaded; usage
-// writes go through the writeback writer, off the serve path.
-func NewManager(dbAdap Store, sealer *crypto.Sealer, usage *writeback.Writer, logger zerolog.Logger) (*Manager, error) {
-	m := &Manager{
-		rr:     NewRoundRobin(),
-		dbAdap: dbAdap,
-		usage:  usage,
-		sealer: sealer,
-		logger: logger.With().Str("component", "keypool").Logger(),
-	}
-
-	if err := m.ReloadKeys(); err != nil {
-		return nil, err
-	}
-
-	return m, nil
-}
-
-var (
-	ErrOutOfScope = errors.New("no key in scope serves the feature")
-	ErrExhausted  = errors.New("no key available for feature")
-)
-
-// Served is a drawn key's fields, copied under the pool lock so a reload cannot
-// rewrite them while the caller reads.
 type Served struct {
 	ID       string
 	KeyValue string
@@ -66,7 +45,25 @@ type Served struct {
 	Secrets  map[string]string
 }
 
-func (m *Manager) candidates(feature string, allowedTierIDs map[string]bool) (available []*PoolKey, offered bool) {
+func NewManager(dbAdap Store, sealer *crypto.Sealer, usage *writeback.Writer, logger zerolog.Logger) (*Manager, error) {
+	m := &Manager{
+		dbAdap: dbAdap,
+		usage:  usage,
+		sealer: sealer,
+		logger: logger.With().Str("component", "keypool").Logger(),
+	}
+	if err := m.ReloadKeys(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]bool) (*Served, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var available []*PoolKey
+	offered := false
 	for _, key := range m.keys {
 		if (allowedTierIDs != nil && !allowedTierIDs[key.TierID]) || !key.HasFeature(feature) {
 			continue
@@ -76,28 +73,18 @@ func (m *Manager) candidates(feature string, allowedTierIDs map[string]bool) (av
 			available = append(available, key)
 		}
 	}
-	return available, offered
-}
-
-// GetKeyForFeature draws a key in an allowed tier (nil allows every tier) with
-// rate and usage budget left. The rate window is tried first so a rate-blocked
-// key does not consume usage.
-func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]bool) (*Served, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	available, offered := m.candidates(feature, allowedTierIDs)
 	for len(available) > 0 {
-		selected := m.rr.Select(available)
-		if selected.TryRate(feature) {
-			if ok, didReset, windowStart := selected.TryConsumeUsage(); ok {
-				if selected.UsageLimit != nil {
-					m.persistUsage(selected, didReset, windowStart)
+		i := int((m.next.Add(1) - 1) % uint64(len(available)))
+		key := available[i]
+		if key.TryRate(feature) {
+			if ok, didReset, windowStart := key.TryConsumeUsage(); ok {
+				if key.UsageLimit != nil {
+					m.persistUsage(key.ID, didReset, windowStart)
 				}
-				return &Served{ID: selected.ID, KeyValue: selected.KeyValue, Metadata: selected.Metadata, Secrets: selected.Secrets}, nil
+				return &Served{ID: key.ID, KeyValue: key.KeyValue, Metadata: key.Metadata, Secrets: key.Secrets}, nil
 			}
 		}
-		available = removeKey(available, selected)
+		available = append(available[:i], available[i+1:]...)
 	}
 	if !offered {
 		return nil, ErrOutOfScope
@@ -105,28 +92,18 @@ func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]boo
 	return nil, ErrExhausted
 }
 
-// persistUsage queues the cumulative usage change (the in-memory mutation already
-// happened atomically in TryConsumeUsage) so a restart resumes the count. A rolled
-// over window (didReset) queues the reset instead of an increment. The write lands
-// within a flush period; a crash loses at most that period's counts.
-// Single-replica assumption: under multiple replicas the in-memory count is
-// per-replica; only the DB count is authoritative.
-func (m *Manager) persistUsage(key *PoolKey, didReset bool, windowStart time.Time) {
+func (m *Manager) persistUsage(keyID string, didReset bool, windowStart time.Time) {
 	if didReset {
-		m.usage.WindowReset(key.ID, windowStart)
+		m.usage.WindowReset(keyID, windowStart)
 		return
 	}
-	m.usage.Served(key.ID)
+	m.usage.Served(keyID)
 }
 
-// ReloadKeys reads all keys from the database and rebuilds the pool.
-// Preserves runtime state (rate counters) for existing keys.
 func (m *Manager) ReloadKeys() error {
-	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
+	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
 	defer cancel()
 
-	// Three reads however many keys there are: keys, every tier's features, every
-	// key's secrets.
 	dbKeys, err := m.dbAdap.GetAllKeys(ctx)
 	if err != nil {
 		return err
@@ -139,7 +116,6 @@ func (m *Manager) ReloadKeys() error {
 	if err != nil {
 		return err
 	}
-	tierFeatures := featureLimits(byTier)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -148,17 +124,13 @@ func (m *Manager) ReloadKeys() error {
 	for _, key := range m.keys {
 		existing[key.ID] = key
 	}
-
 	newKeys := make([]*PoolKey, 0, len(dbKeys))
 	for _, k := range dbKeys {
-		features := tierFeatures[k.TierID]
-		if features == nil {
-			m.logger.Warn().Str("key_id", k.ID).Str("tier_id", k.TierID).
-				Msg("key skipped from pool: tier has no features")
+		features := featureLimits(byTier[k.TierID])
+		if len(features) == 0 {
+			m.logger.Warn().Str("key_id", k.ID).Str("tier_id", k.TierID).Msg("key skipped from pool: tier has no features")
 			continue
 		}
-
-		// A key already in the pool keeps its object, and with it its runtime state.
 		key, ok := existing[k.ID]
 		if !ok {
 			key = &PoolKey{UsageCount: k.UsageCount, UsageWindowStart: k.UsageWindowStart}
@@ -166,34 +138,24 @@ func (m *Manager) ReloadKeys() error {
 		key.load(k, features, m.openSecrets(k.ID, byKey[k.ID]))
 		newKeys = append(newKeys, key)
 	}
-
 	m.keys = newKeys
-	m.logger.Debug().Int("key_count", len(m.keys)).Msg("key pool reloaded")
 	return nil
 }
 
-// featureLimits indexes each tier's features by name: tierID -> feature -> limit.
-func featureLimits(byTier map[string][]*db.TierFeature) map[string]map[string]FeatureLimit {
-	limits := make(map[string]map[string]FeatureLimit, len(byTier))
-	for tierID, features := range byTier {
-		byName := make(map[string]FeatureLimit, len(features))
-		for _, f := range features {
-			byName[f.Feature] = FeatureLimit{RateLimit: f.RateLimit, WindowSeconds: f.WindowSeconds}
-		}
-		limits[tierID] = byName
+func featureLimits(features []*db.TierFeature) map[string]FeatureLimit {
+	limits := make(map[string]FeatureLimit, len(features))
+	for _, f := range features {
+		limits[f.Feature] = FeatureLimit{RateLimit: f.RateLimit, WindowSeconds: f.WindowSeconds}
 	}
 	return limits
 }
 
-// openSecrets opens a key's bound secrets via the sealer (values tagged as
-// encrypted are decrypted, plaintext values pass through) into a name->value map.
-// Open failures are logged without the value and skipped.
 func (m *Manager) openSecrets(keyID string, rows []*db.KeySecret) map[string]string {
 	secrets := make(map[string]string, len(rows))
 	for _, s := range rows {
-		plain, derr := m.sealer.Open(s.Value)
-		if derr != nil {
-			m.logger.Error().Err(derr).Str("key_id", keyID).Str("secret", s.Name).Msg("failed to open secret")
+		plain, err := m.sealer.Open(s.Value)
+		if err != nil {
+			m.logger.Error().Err(err).Str("key_id", keyID).Str("secret", s.Name).Msg("failed to open secret")
 			continue
 		}
 		secrets[s.Name] = plain
@@ -210,8 +172,7 @@ func (m *Manager) find(id string) *PoolKey {
 	return nil
 }
 
-// TierOf reports the tier a pooled key belongs to, and false when the key is unknown.
-func (m *Manager) TierOf(id string) (tierID string, ok bool) {
+func (m *Manager) TierOf(id string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if key := m.find(id); key != nil {
@@ -220,8 +181,6 @@ func (m *Manager) TierOf(id string) (tierID string, ok bool) {
 	return "", false
 }
 
-// MarkExhausted takes a key out of rotation until `until`, then persists it
-// outside the pool lock so draws never wait on the database.
 func (m *Manager) MarkExhausted(id string, until time.Time) bool {
 	m.mu.Lock()
 	key := m.find(id)
@@ -232,7 +191,7 @@ func (m *Manager) MarkExhausted(id string, until time.Time) bool {
 	if key == nil {
 		return false
 	}
-	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
+	ctx, cancel := context.WithTimeout(context.Background(), dbTimeout)
 	defer cancel()
 	if err := m.dbAdap.SetKeyExhausted(ctx, id, until); err != nil {
 		m.logger.Error().Err(err).Str("key_id", id).Msg("failed to persist exhausted_until")
@@ -240,14 +199,26 @@ func (m *Manager) MarkExhausted(id string, until time.Time) bool {
 	return true
 }
 
-// PoolSize returns the number of keys in the pool.
 func (m *Manager) PoolSize() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.keys)
 }
 
-// GetHealthStatus returns a snapshot of all keys' current state.
+type KeyHealth struct {
+	ID             string
+	Name           string
+	TierID         string
+	IsActive       bool
+	ExpiresAt      *time.Time
+	ExhaustedUntil *time.Time
+	UsageLimit     *int
+	UsageCount     int
+	Metadata       map[string]any
+	SecretNames    []string
+	Usage          map[string]RateInfo
+}
+
 func (m *Manager) GetHealthStatus() []KeyHealth {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -273,30 +244,4 @@ func (m *Manager) GetHealthStatus() []KeyHealth {
 		}
 	}
 	return statuses
-}
-
-// KeyHealth is a read-only snapshot of a key's health. It never carries
-// decrypted secret values, only their names.
-type KeyHealth struct {
-	ID             string
-	Name           string
-	TierID         string
-	IsActive       bool
-	ExpiresAt      *time.Time
-	ExhaustedUntil *time.Time
-	UsageLimit     *int
-	UsageCount     int
-	Metadata       map[string]any
-	SecretNames    []string
-	Usage          map[string]RateInfo
-}
-
-func removeKey(keys []*PoolKey, target *PoolKey) []*PoolKey {
-	result := make([]*PoolKey, 0, len(keys)-1)
-	for _, k := range keys {
-		if k != target {
-			result = append(result, k)
-		}
-	}
-	return result
 }

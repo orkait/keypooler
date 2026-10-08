@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
-// --- Consumers ---
+const consumerColumns = "id, name, token_hash, description, is_active, created_at"
 
 func (a *PostgresAdapter) CreateConsumer(ctx context.Context, consumer *Consumer) error {
 	_, err := a.pool.Exec(ctx,
@@ -19,8 +20,6 @@ func (a *PostgresAdapter) CreateConsumer(ctx context.Context, consumer *Consumer
 	return duplicate(err)
 }
 
-const consumerColumns = "id, name, token_hash, description, is_active, created_at"
-
 func scanConsumer(scan func(dest ...any) error) (*Consumer, error) {
 	var c Consumer
 	if err := scan(&c.ID, &c.Name, &c.TokenHash, &c.Description, &c.IsActive, &c.CreatedAt); err != nil {
@@ -29,8 +28,6 @@ func scanConsumer(scan func(dest ...any) error) (*Consumer, error) {
 	return &c, nil
 }
 
-// GetConsumerByTokenHash returns the active consumer whose token_hash matches.
-// Inactive consumers are excluded so a revoked token never authenticates.
 func (a *PostgresAdapter) GetConsumerByTokenHash(ctx context.Context, tokenHash string) (*Consumer, error) {
 	c, err := scanConsumer(a.pool.QueryRow(ctx,
 		"SELECT "+consumerColumns+" FROM consumers WHERE token_hash = $1 AND is_active",
@@ -61,8 +58,6 @@ func (a *PostgresAdapter) GetAllConsumers(ctx context.Context) ([]*Consumer, err
 }
 
 func (a *PostgresAdapter) DeleteConsumer(ctx context.Context, id string) error {
-	// Explicit child cleanup in one transaction: a delete must not leave orphan
-	// scope rows that could re-grant access if an id were reused.
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -81,8 +76,6 @@ func (a *PostgresAdapter) DeleteConsumer(ctx context.Context, id string) error {
 	return tx.Commit(ctx)
 }
 
-// AddConsumerScope grants a consumer access to a tier. Idempotent: a duplicate
-// (consumer_id, tier_id) is ignored rather than erroring.
 func (a *PostgresAdapter) AddConsumerScope(ctx context.Context, consumerID, tierID string) error {
 	_, err := a.pool.Exec(ctx,
 		"INSERT INTO consumer_scopes (consumer_id, tier_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
@@ -96,20 +89,9 @@ func (a *PostgresAdapter) GetConsumerScopes(ctx context.Context, consumerID stri
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var tierIDs []string
-	for rows.Next() {
-		var tierID string
-		if err := rows.Scan(&tierID); err != nil {
-			return nil, err
-		}
-		tierIDs = append(tierIDs, tierID)
-	}
-	return tierIDs, rows.Err()
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
-// ConsumerScopesByConsumer reads every consumer's granted tiers in one query.
 func (a *PostgresAdapter) ConsumerScopesByConsumer(ctx context.Context) (map[string][]string, error) {
 	rows, err := a.pool.Query(ctx, "SELECT consumer_id, tier_id FROM consumer_scopes ORDER BY consumer_id, tier_id")
 	if err != nil {
@@ -128,10 +110,6 @@ func (a *PostgresAdapter) ConsumerScopesByConsumer(ctx context.Context) (map[str
 	return byConsumer, rows.Err()
 }
 
-// --- Usage Events ---
-
-// RecordUsageEvents writes a batch of serves in one COPY. An event with no
-// consumer is stored with a NULL consumer_id.
 func (a *PostgresAdapter) RecordUsageEvents(ctx context.Context, events []*UsageEvent) error {
 	if len(events) == 0 {
 		return nil
@@ -176,8 +154,6 @@ func (a *PostgresAdapter) ListUsageEvents(ctx context.Context, limit int) ([]*Us
 	return events, rows.Err()
 }
 
-// NewUsageEvent stamps a serve with a fresh id and the current time, so a batched
-// write keeps when the serve happened rather than when the batch landed.
 func NewUsageEvent(keyID, consumerID, feature string) *UsageEvent {
-	return &UsageEvent{ID: uuidString(), KeyID: keyID, ConsumerID: consumerID, Feature: feature, CreatedAt: time.Now().UTC()}
+	return &UsageEvent{ID: uuid.New().String(), KeyID: keyID, ConsumerID: consumerID, Feature: feature, CreatedAt: time.Now().UTC()}
 }
