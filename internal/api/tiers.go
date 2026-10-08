@@ -73,22 +73,16 @@ func (s *Server) CreateTier(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
 	tier := &db.Tier{ID: uuid.New().String(), Name: body.Name}
 	if body.Description != nil {
 		tier.Description = *body.Description
 	}
-	if err := s.DB.CreateTier(ctx, tier); errors.Is(err, db.ErrDuplicate) {
+	stored, echoed := tierFeatures(tier.ID, body.Features)
+	if err := s.DB.CreateTier(r.Context(), tier, stored); errors.Is(err, db.ErrDuplicate) {
 		writeError(w, http.StatusConflict, "tier already exists: "+body.Name)
 		return
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create tier")
-		return
-	}
-
-	stored, echoed := tierFeatures(tier.ID, body.Features)
-	if err := s.DB.SetTierFeatures(ctx, tier.ID, stored); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to set features")
 		return
 	}
 	writeJSON(w, http.StatusCreated, tierResponse(tier, echoed))

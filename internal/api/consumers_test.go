@@ -21,7 +21,9 @@ type failingCreates struct {
 	err error
 }
 
-func (f failingCreates) CreateTier(context.Context, *db.Tier) error         { return f.err }
+func (f failingCreates) CreateTier(context.Context, *db.Tier, []*db.TierFeature) error {
+	return f.err
+}
 func (f failingCreates) CreateConsumer(context.Context, *db.Consumer) error { return f.err }
 
 func TestACreateIsAConflictOnlyWhenTheNameIsTaken(t *testing.T) {

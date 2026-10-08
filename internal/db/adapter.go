@@ -11,7 +11,7 @@ type DBAdapter interface {
 	Close() error
 
 	// Tiers
-	CreateTier(ctx context.Context, tier *Tier) error
+	CreateTier(ctx context.Context, tier *Tier, features []*TierFeature) error
 	GetTier(ctx context.Context, id string) (*Tier, error)
 	GetTierByName(ctx context.Context, name string) (*Tier, error)
 	GetAllTiers(ctx context.Context) ([]*Tier, error)

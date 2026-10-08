@@ -12,12 +12,25 @@ import (
 
 // --- Tiers ---
 
-func (a *PostgresAdapter) CreateTier(ctx context.Context, tier *Tier) error {
-	_, err := a.pool.Exec(ctx,
+// CreateTier stores a tier and its features in one transaction: a tier never
+// exists without the features it was created with.
+func (a *PostgresAdapter) CreateTier(ctx context.Context, tier *Tier, features []*TierFeature) error {
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
 		"INSERT INTO tiers (id, name, description) VALUES ($1, $2, $3)",
 		tier.ID, tier.Name, tier.Description,
-	)
-	return duplicate(err)
+	); err != nil {
+		return duplicate(err)
+	}
+	if err := insertTierFeatures(ctx, tx, tier.ID, features); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (a *PostgresAdapter) GetTier(ctx context.Context, id string) (*Tier, error) {
@@ -113,6 +126,13 @@ func (a *PostgresAdapter) SetTierFeatures(ctx context.Context, tierID string, fe
 	if _, err := tx.Exec(ctx, "DELETE FROM tier_features WHERE tier_id = $1", tierID); err != nil {
 		return err
 	}
+	if err := insertTierFeatures(ctx, tx, tierID, features); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func insertTierFeatures(ctx context.Context, tx pgx.Tx, tierID string, features []*TierFeature) error {
 	for _, f := range features {
 		if _, err := tx.Exec(ctx,
 			"INSERT INTO tier_features (tier_id, feature, rate_limit, window_seconds) VALUES ($1, $2, $3, $4)",
@@ -121,7 +141,7 @@ func (a *PostgresAdapter) SetTierFeatures(ctx context.Context, tierID string, fe
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // TierFeaturesByTier reads every tier's features in one query, each tier's in

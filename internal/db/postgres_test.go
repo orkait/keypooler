@@ -33,7 +33,7 @@ func freshDB(t *testing.T) *PostgresAdapter {
 
 func seedTier(t *testing.T, a *PostgresAdapter, id string) {
 	t.Helper()
-	if err := a.CreateTier(context.Background(), &Tier{ID: id, Name: id, Description: "d"}); err != nil {
+	if err := a.CreateTier(context.Background(), &Tier{ID: id, Name: id, Description: "d"}, nil); err != nil {
 		t.Fatalf("tier: %v", err)
 	}
 }
@@ -81,10 +81,28 @@ func TestTiersAndFeaturesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestATierAndItsFeaturesLandTogetherOrNotAtAll(t *testing.T) {
+	a, ctx := freshDB(t), context.Background()
+	twice := []*TierFeature{{Feature: "chat", RateLimit: 1}, {Feature: "chat", RateLimit: 2}}
+	if err := a.CreateTier(ctx, &Tier{ID: "bad", Name: "bad"}, twice); err == nil {
+		t.Fatal("a feature that cannot be stored must fail the tier with it")
+	}
+	if tier, err := a.GetTierByName(ctx, "bad"); tier != nil || err != nil {
+		t.Fatalf("the tier of a failed create was left behind: %+v err %v", tier, err)
+	}
+
+	if err := a.CreateTier(ctx, &Tier{ID: "t", Name: "t"}, []*TierFeature{{Feature: "chat", RateLimit: 30, WindowSeconds: 60}}); err != nil {
+		t.Fatal(err)
+	}
+	if byTier, err := a.TierFeaturesByTier(ctx); err != nil || len(byTier["t"]) != 1 || byTier["t"][0].TierID != "t" {
+		t.Fatalf("features %+v err %v", byTier, err)
+	}
+}
+
 func TestATakenNameIsADuplicate(t *testing.T) {
 	cases := map[string]func(*PostgresAdapter) error{
 		"tier": func(a *PostgresAdapter) error {
-			return a.CreateTier(context.Background(), &Tier{ID: "t2", Name: "t"})
+			return a.CreateTier(context.Background(), &Tier{ID: "t2", Name: "t"}, nil)
 		},
 		"consumer": func(a *PostgresAdapter) error {
 			return a.CreateConsumer(context.Background(), &Consumer{ID: "c2", Name: "c", TokenHash: "h2"})
