@@ -49,6 +49,7 @@ type addKeyBody struct {
 	UsageWindowSeconds *int              `json:"usage_window_seconds"`
 	Metadata           map[string]any    `json:"metadata"`
 	Secrets            map[string]string `json:"secrets"`
+	Budget             *budgetBody       `json:"budget"`
 }
 
 func decodeAddKey(w http.ResponseWriter, r *http.Request) (addKeyBody, *time.Time, bool) {
@@ -59,6 +60,10 @@ func decodeAddKey(w http.ResponseWriter, r *http.Request) (addKeyBody, *time.Tim
 	}
 	if body.Name == "" || body.Key == "" || body.Tier == "" {
 		writeError(w, http.StatusBadRequest, "name, key, and tier are required")
+		return body, nil, false
+	}
+	if _, err := body.Budget.budget(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return body, nil, false
 	}
 	if body.ExpiresAt == nil || *body.ExpiresAt == "" {
@@ -77,7 +82,12 @@ func (s *Server) sealedRows(body addKeyBody, tierID string, expiresAt *time.Time
 	if err != nil {
 		return nil, nil, err
 	}
+	budget, err := body.Budget.budget()
+	if err != nil {
+		return nil, nil, err
+	}
 	key := &db.Key{
+		Budget:             budget,
 		ID:                 uuid.New().String(),
 		Name:               body.Name,
 		KeyValue:           sealedKey,
@@ -166,6 +176,10 @@ func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 			ExhaustedUntil: rfc3339OrNil(ks.ExhaustedUntil),
 			UsageLimit:     ks.UsageLimit,
 			UsageCount:     ks.UsageCount,
+			Budget:         budgetViewOf(ks.Budget),
+			Spent:          ks.Spent,
+			Remaining:      keypool.Remaining(ks.Budget, ks.Spent),
+			ResetsAt:       rfc3339OrNil(ks.ResetsAt),
 			Metadata:       ks.Metadata,
 			SecretNames:    ks.SecretNames,
 			Usage:          usage,

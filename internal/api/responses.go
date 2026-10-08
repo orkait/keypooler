@@ -48,9 +48,33 @@ type listedKey struct {
 	ExhaustedUntil *string              `json:"exhausted_until"`
 	UsageLimit     *int                 `json:"usage_limit"`
 	UsageCount     int                  `json:"usage_count"`
+	Budget         *budgetView          `json:"budget"`
+	Spent          float64              `json:"spent"`
+	Remaining      *float64             `json:"remaining"`
+	ResetsAt       *string              `json:"resets_at"`
 	Metadata       map[string]any       `json:"metadata"`
 	SecretNames    []string             `json:"secret_names"`
 	Usage          map[string]rateUsage `json:"usage"`
+}
+
+type budgetView struct {
+	Amount   float64 `json:"amount"`
+	Unit     string  `json:"unit"`
+	ResetDay *int    `json:"reset_day"`
+}
+
+type budgetSet struct {
+	KeyID  string      `json:"key_id"`
+	Budget *budgetView `json:"budget"`
+}
+
+type spendRecorded struct {
+	KeyID     string      `json:"key_id"`
+	Spent     float64     `json:"spent"`
+	Budget    *budgetView `json:"budget"`
+	Remaining *float64    `json:"remaining"`
+	ResetsAt  *string     `json:"resets_at"`
+	Duplicate bool        `json:"duplicate"`
 }
 
 type exhaustedKey struct {

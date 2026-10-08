@@ -65,13 +65,14 @@ func addKey(t *testing.T, body string) (*keyStore, *httptest.ResponseRecorder) {
 
 func TestAKeyIsStoredWithItsTierLimitsAndSecretsAndEchoedWithoutThem(t *testing.T) {
 	store, w := addKey(t, `{"name":"k","key":"sk-1","tier":"known","expires_at":"2027-01-01T00:00:00Z",
-		"usage_limit":5,"metadata":{"account":"a"},"secrets":{"webhook":"s"}}`)
+		"usage_limit":5,"metadata":{"account":"a"},"secrets":{"webhook":"s"},"budget":{"amount":200,"unit":"usd","reset_day":1}}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
 	k := store.created
 	if k.TierID != "tier-1" || k.KeyValue != "sk-1" || !k.IsActive || *k.UsageLimit != 5 ||
-		!k.ExpiresAt.Equal(time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)) || k.Metadata["account"] != "a" {
+		!k.ExpiresAt.Equal(time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)) || k.Metadata["account"] != "a" ||
+		k.Budget == nil || k.Budget.Amount != 200 || *k.Budget.ResetDay != 1 {
 		t.Fatalf("stored %+v", k)
 	}
 	if len(store.secrets) != 1 || store.secrets[0].KeyID != k.ID || store.secrets[0].Value != "s" {
@@ -126,6 +127,7 @@ func TestAKeyThatCannotBeAddedSaysWhy(t *testing.T) {
 		"missing-key":  {`{"name":"k","tier":"known"}`, http.StatusBadRequest},
 		"bad-expiry":   {`{"name":"k","key":"sk","tier":"known","expires_at":"soon"}`, http.StatusBadRequest},
 		"unknown-tier": {`{"name":"k","key":"sk","tier":"nope"}`, http.StatusNotFound},
+		"bad-budget":   {`{"name":"k","key":"sk","tier":"known","budget":{"amount":200,"unit":"eur"}}`, http.StatusBadRequest},
 		"not-json":     {`{`, http.StatusBadRequest},
 	}
 	for name, c := range cases {

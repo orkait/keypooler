@@ -21,6 +21,8 @@ type DBAdapter interface {
 	AddUsage(ctx context.Context, keyID string, n int) error
 	ResetUsageWindow(ctx context.Context, keyID string, start time.Time, count int) error
 	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
+	UpdateKeyBudget(ctx context.Context, keyID string, budget *Budget) error
+	RecordSpend(ctx context.Context, event *SpendEvent, periodStart *time.Time) (spent float64, duplicate bool, err error)
 	KeySecretsByKey(ctx context.Context) (map[string][]*KeySecret, error)
 
 	CreateConsumer(ctx context.Context, consumer *Consumer) error
@@ -61,8 +63,27 @@ type Key struct {
 	UsageWindowSeconds *int
 	UsageWindowStart   *time.Time
 	ExhaustedUntil     *time.Time
+	Budget             *Budget
+	Spent              float64
+	SpentPeriodStart   *time.Time
 	Metadata           map[string]any
 	CreatedAt          time.Time
+}
+
+type Budget struct {
+	Amount   float64
+	Unit     string
+	ResetDay *int
+}
+
+type SpendEvent struct {
+	ID         string
+	KeyID      string
+	ConsumerID string
+	Amount     float64
+	Unit       string
+	RequestID  string
+	CreatedAt  time.Time
 }
 
 type KeySecret struct {

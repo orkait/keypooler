@@ -26,6 +26,7 @@ type Store interface {
 	TierFeaturesByTier(ctx context.Context) (map[string][]*db.TierFeature, error)
 	KeySecretsByKey(ctx context.Context) (map[string][]*db.KeySecret, error)
 	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
+	RecordSpend(ctx context.Context, event *db.SpendEvent, periodStart *time.Time) (spent float64, duplicate bool, err error)
 }
 
 type Manager struct {
@@ -199,6 +200,43 @@ func (m *Manager) MarkExhausted(id string, until time.Time) bool {
 	return true
 }
 
+func (m *Manager) RecordSpend(ctx context.Context, event *db.SpendEvent) (*Spend, error) {
+	m.mu.RLock()
+	key := m.find(event.KeyID)
+	var budget *db.Budget
+	if key != nil {
+		budget = key.Budget
+	}
+	m.mu.RUnlock()
+	if key == nil {
+		return nil, ErrUnknownKey
+	}
+	if budget != nil && event.Unit != budget.Unit {
+		return nil, ErrUnitMismatch
+	}
+	now := time.Now()
+	var start *time.Time
+	if budget != nil {
+		s := periodStart(*budget, now)
+		start = &s
+	}
+	spent, duplicate, err := m.dbAdap.RecordSpend(ctx, event, start)
+	if errors.Is(err, db.ErrKeyNotFound) {
+		return nil, ErrUnknownKey
+	}
+	if err != nil {
+		return nil, err
+	}
+	spend := &Spend{KeyID: event.KeyID, Budget: budget, Duplicate: duplicate}
+	if start != nil {
+		m.mu.Lock()
+		key.holdSpent(spent, *start)
+		m.mu.Unlock()
+		spend.Spent, spend.ResetsAt = spent, nextReset(*budget, now)
+	}
+	return spend, nil
+}
+
 func (m *Manager) PoolSize() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -214,6 +252,9 @@ type KeyHealth struct {
 	ExhaustedUntil *time.Time
 	UsageLimit     *int
 	UsageCount     int
+	Budget         *db.Budget
+	Spent          float64
+	ResetsAt       *time.Time
 	Metadata       map[string]any
 	SecretNames    []string
 	Usage          map[string]RateInfo
@@ -223,11 +264,16 @@ func (m *Manager) GetHealthStatus() []KeyHealth {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	now := time.Now()
 	statuses := make([]KeyHealth, len(m.keys))
 	for i, key := range m.keys {
 		secretNames := make([]string, 0, len(key.Secrets))
 		for name := range key.Secrets {
 			secretNames = append(secretNames, name)
+		}
+		var resetsAt *time.Time
+		if key.Budget != nil {
+			resetsAt = nextReset(*key.Budget, now)
 		}
 		statuses[i] = KeyHealth{
 			ID:             key.ID,
@@ -238,6 +284,9 @@ func (m *Manager) GetHealthStatus() []KeyHealth {
 			ExhaustedUntil: key.ExhaustedUntil,
 			UsageLimit:     key.UsageLimit,
 			UsageCount:     key.UsageSnapshot(),
+			Budget:         key.Budget,
+			Spent:          key.spentNow(now),
+			ResetsAt:       resetsAt,
 			Metadata:       key.Metadata,
 			SecretNames:    secretNames,
 			Usage:          key.RateUsage(),

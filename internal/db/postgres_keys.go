@@ -125,9 +125,10 @@ func (a *PostgresAdapter) CreateKey(ctx context.Context, key *Key, secrets []*Ke
 	}
 	defer tx.Rollback(ctx)
 
+	budgetAmount, budgetUnit, budgetResetDay := budgetColumns(key.Budget)
 	if _, err := tx.Exec(ctx,
-		"INSERT INTO keys (id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-		key.ID, key.Name, key.KeyValue, key.TierID, key.IsActive, key.ExpiresAt, key.UsageLimit, key.UsageCount, key.UsageWindowSeconds, key.UsageWindowStart, string(metadata),
+		"INSERT INTO keys (id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, metadata_json, budget_amount, budget_unit, budget_reset_day) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+		key.ID, key.Name, key.KeyValue, key.TierID, key.IsActive, key.ExpiresAt, key.UsageLimit, key.UsageCount, key.UsageWindowSeconds, key.UsageWindowStart, string(metadata), budgetAmount, budgetUnit, budgetResetDay,
 	); err != nil {
 		return err
 	}
@@ -143,7 +144,7 @@ func (a *PostgresAdapter) CreateKey(ctx context.Context, key *Key, secrets []*Ke
 }
 
 func (a *PostgresAdapter) GetAllKeys(ctx context.Context) ([]*Key, error) {
-	rows, err := a.pool.Query(ctx, "SELECT id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, exhausted_until, metadata_json, created_at FROM keys ORDER BY created_at")
+	rows, err := a.pool.Query(ctx, "SELECT id, name, key_value, tier_id, is_active, expires_at, usage_limit, usage_count, usage_window_seconds, usage_window_start, exhausted_until, metadata_json, created_at, budget_amount, budget_unit, budget_reset_day, spent, spent_period_start FROM keys ORDER BY created_at")
 	if err != nil {
 		return nil, err
 	}
@@ -153,9 +154,14 @@ func (a *PostgresAdapter) GetAllKeys(ctx context.Context) ([]*Key, error) {
 	for rows.Next() {
 		var k Key
 		var metadata string
-		if err := rows.Scan(&k.ID, &k.Name, &k.KeyValue, &k.TierID, &k.IsActive, &k.ExpiresAt, &k.UsageLimit, &k.UsageCount, &k.UsageWindowSeconds, &k.UsageWindowStart, &k.ExhaustedUntil, &metadata, &k.CreatedAt); err != nil {
+		var budgetAmount *float64
+		var budgetUnit *string
+		var budgetResetDay *int
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyValue, &k.TierID, &k.IsActive, &k.ExpiresAt, &k.UsageLimit, &k.UsageCount, &k.UsageWindowSeconds, &k.UsageWindowStart, &k.ExhaustedUntil, &metadata, &k.CreatedAt,
+			&budgetAmount, &budgetUnit, &budgetResetDay, &k.Spent, &k.SpentPeriodStart); err != nil {
 			return nil, err
 		}
+		k.Budget = budgetOf(budgetAmount, budgetUnit, budgetResetDay)
 		if metadata == "" {
 			metadata = "{}"
 		}
