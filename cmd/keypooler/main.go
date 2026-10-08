@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/orkait/keypooler/internal/api"
 	"github.com/orkait/keypooler/internal/config"
@@ -14,8 +15,17 @@ import (
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/keypool"
 	"github.com/orkait/keypooler/internal/util"
+	"github.com/orkait/keypooler/internal/writeback"
 
 	"github.com/rs/zerolog"
+)
+
+const (
+	// How often usage counts and audit events land; a crash loses at most this much.
+	writebackPeriod = time.Second
+	// How long a resolved consumer token is trusted without a lookup. Admin writes
+	// clear it sooner.
+	authCacheTTL = time.Minute
 )
 
 func main() {
@@ -28,22 +38,14 @@ func main() {
 	logger := setupLogger(cfg)
 	logger.Info().Msg("starting keypooler")
 
-	// Database: Turso/libSQL when DATABASE_URL is set, else local SQLite.
-	var dbAdapter *db.SQLiteAdapter
-	if cfg.DatabaseURL != "" {
-		logger.Info().Msg("using libSQL (Turso) database")
-		dbAdapter, err = db.NewLibsqlAdapter(cfg.DatabaseURL)
-	} else {
-		logger.Info().Str("path", cfg.DBPath).Msg("using local SQLite database")
-		dbAdapter, err = db.NewSQLiteAdapter(cfg.DBPath, cfg.DBBusyTimeoutMS)
-	}
+	dbAdapter, err := db.NewPostgresAdapter(cfg.DatabaseURL, cfg.DBMaxOpenConns)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize database")
 	}
 	defer dbAdapter.Close()
 
 	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
-	if err := db.RunMigrations(ctx, dbAdapter.DB(), "./migrations"); err != nil {
+	if err := db.RunMigrations(ctx, dbAdapter.Pool(), "./migrations"); err != nil {
 		cancel()
 		logger.Fatal().Err(err).Msg("failed to run migrations")
 	}
@@ -57,8 +59,17 @@ func main() {
 		logger.Fatal().Err(err).Msg("invalid encryption configuration")
 	}
 
+	// Usage counts and audit events are written behind the response.
+	usage := writeback.New(dbAdapter, logger)
+	flushCtx, stopFlushing := context.WithCancel(context.Background())
+	flushed := make(chan struct{})
+	go func() {
+		usage.Run(flushCtx, writebackPeriod)
+		close(flushed)
+	}()
+
 	// Key pool
-	poolMgr, err := keypool.NewManager(dbAdapter, sealer, logger)
+	poolMgr, err := keypool.NewManager(dbAdapter, sealer, usage, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize key pool")
 	}
@@ -67,6 +78,8 @@ func main() {
 	srv := &api.Server{
 		DB:     dbAdapter,
 		Pool:   poolMgr,
+		Usage:  usage,
+		Auth:   api.NewAuthCache(authCacheTTL),
 		Cfg:    cfg,
 		Sealer: sealer,
 		Logger: logger,
@@ -98,6 +111,9 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("HTTP server shutdown error")
 	}
+	// No request is in flight now; the last flush writes what they left.
+	stopFlushing()
+	<-flushed
 
 	logger.Info().Msg("keypooler stopped")
 }

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -10,7 +9,7 @@ import (
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/keypool"
-	"github.com/orkait/keypooler/internal/util"
+	"github.com/orkait/keypooler/internal/writeback"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -23,6 +22,8 @@ const exhaustedEvent = "exhausted"
 type Server struct {
 	DB     db.DBAdapter
 	Pool   *keypool.Manager
+	Usage  *writeback.Writer
+	Auth   *AuthCache
 	Cfg    *config.Config
 	Sealer *crypto.Sealer
 	Logger zerolog.Logger
@@ -81,8 +82,8 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Audit the serve asynchronously: best-effort, never blocks the response.
-	s.recordUsageEventAsync(key.ID, caller.consumerID, feature)
+	// Audit the serve behind the response: the writeback batch lands it.
+	s.Usage.Event(db.NewUsageEvent(key.ID, caller.consumerID, feature))
 
 	// Secrets are opened on load by the manager; return them at this trusted
 	// boundary alongside the key value and metadata.
@@ -101,18 +102,6 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		"metadata": metadata,
 		"secrets":  secrets,
 	})
-}
-
-// recordUsageEventAsync writes a usage_event in a detached goroutine so the audit
-// write never adds latency to the /key response. Failures are logged only.
-func (s *Server) recordUsageEventAsync(keyID, consumerID, feature string) {
-	go func() {
-		ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
-		defer cancel()
-		if err := s.DB.RecordUsageEvent(ctx, keyID, consumerID, feature); err != nil {
-			s.Logger.Error().Err(err).Str("key_id", keyID).Msg("failed to record usage event")
-		}
-	}()
 }
 
 // --- Admin endpoints ---
@@ -501,7 +490,7 @@ func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Pool.MarkExhausted(id, until)
-	s.recordUsageEventAsync(id, caller.consumerID, exhaustedEvent)
+	s.Usage.Event(db.NewUsageEvent(id, caller.consumerID, exhaustedEvent))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "exhausted",
 		"until":  until.UTC().Format(time.RFC3339),

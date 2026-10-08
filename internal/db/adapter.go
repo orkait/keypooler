@@ -30,10 +30,11 @@ type DBAdapter interface {
 	GetKeysByTier(ctx context.Context, tierID string) ([]*Key, error)
 	DeleteKey(ctx context.Context, id string) error
 	SetKeyActive(ctx context.Context, id string, active bool) error
-	IncrementUsage(ctx context.Context, keyID string) error
-	// ResetUsageWindow zeroes usage_count and stamps a fresh usage_window_start.
-	// Used when a key's monthly (windowed) usage budget rolls over.
-	ResetUsageWindow(ctx context.Context, keyID string, start time.Time) error
+	// AddUsage adds n serves to usage_count.
+	AddUsage(ctx context.Context, keyID string, n int) error
+	// ResetUsageWindow sets usage_count to count and stamps a fresh
+	// usage_window_start. Used when a key's monthly (windowed) budget rolls over.
+	ResetUsageWindow(ctx context.Context, keyID string, start time.Time, count int) error
 	// SetKeyExhausted keeps the key out of rotation until `until`.
 	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
 
@@ -50,7 +51,7 @@ type DBAdapter interface {
 	GetConsumerScopes(ctx context.Context, consumerID string) ([]string, error)
 
 	// Usage Events (audit)
-	RecordUsageEvent(ctx context.Context, keyID, consumerID, feature string) error
+	RecordUsageEvents(ctx context.Context, events []*UsageEvent) error
 	ListUsageEvents(ctx context.Context, limit int) ([]*UsageEvent, error)
 }
 

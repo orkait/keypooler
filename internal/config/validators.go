@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -31,6 +32,15 @@ func validateEncryptionKey(key string) error {
 	}
 	if _, err := hex.DecodeString(key); err != nil {
 		return fmt.Errorf("ENCRYPTION_KEY must be valid hex: %w", err)
+	}
+	return nil
+}
+
+// validateDatabaseURL requires a Postgres URL. The URL itself is never echoed: it
+// carries the password.
+func validateDatabaseURL(url string) error {
+	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
+		return fmt.Errorf("DATABASE_URL must be a postgres:// URL")
 	}
 	return nil
 }

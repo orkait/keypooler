@@ -15,9 +15,8 @@ type Config struct {
 	ServerShutdownTimeout time.Duration
 
 	// Database
-	DBPath          string
-	DBBusyTimeoutMS int
-	DatabaseURL     string // libsql:// URL for Turso; when set, overrides local SQLite
+	DatabaseURL    string // postgres:// URL
+	DBMaxOpenConns int
 
 	// Security
 	EncryptionKey string
@@ -38,9 +37,8 @@ func Load() (*Config, error) {
 		ServerIdleTimeout:     getEnvAsDuration("SERVER_IDLE_TIMEOUT_SECONDS", 120, time.Second),
 		ServerShutdownTimeout: getEnvAsDuration("SERVER_SHUTDOWN_TIMEOUT_SECONDS", 30, time.Second),
 
-		DBPath:          getEnv("DB_PATH", "./data/pool.db"),
-		DBBusyTimeoutMS: getEnvAsInt("DB_BUSY_TIMEOUT_MS", 5000),
-		DatabaseURL:     getEnv("DATABASE_URL", ""),
+		DatabaseURL:    getEnv("DATABASE_URL", ""),
+		DBMaxOpenConns: getEnvAsInt("DB_MAX_OPEN_CONNS", 4),
 
 		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
 		AdminToken:    getEnv("ADMIN_TOKEN", ""),
@@ -62,6 +60,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := validateAdminToken(c.AdminToken); err != nil {
+		return err
+	}
+	if err := validateDatabaseURL(c.DatabaseURL); err != nil {
 		return err
 	}
 	if err := validateLogLevel(c.LogLevel); err != nil {

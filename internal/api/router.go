@@ -18,8 +18,9 @@ func NewRouter(srv *Server) http.Handler {
 	// POST /key/{id}/exhausted: same admin-OR-consumer auth, scope-checked inside.
 	mux.Handle("/key/", http.HandlerFunc(srv.ExhaustKey))
 
-	// Admin (admin-token only)
-	admin := AdminAuth(srv.Cfg.AdminToken, srv.Logger)
+	// Admin (admin-token only). A write clears the consumer auth cache.
+	authorized := AdminAuth(srv.Cfg.AdminToken, srv.Logger)
+	admin := func(h http.Handler) http.Handler { return authorized(srv.Auth.clearAfterWrite(h)) }
 	mux.Handle("/admin/tiers", admin(http.HandlerFunc(srv.routeTiers)))
 	mux.Handle("/admin/keys", admin(http.HandlerFunc(srv.routeKeys)))
 	mux.Handle("/admin/keys/", admin(http.HandlerFunc(srv.DeleteKey)))

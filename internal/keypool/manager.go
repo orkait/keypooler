@@ -8,6 +8,7 @@ import (
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/util"
+	"github.com/orkait/keypooler/internal/writeback"
 
 	"github.com/rs/zerolog"
 )
@@ -18,16 +19,19 @@ type Manager struct {
 	keys   []*PoolKey
 	rr     *RoundRobin
 	dbAdap db.DBAdapter
+	usage  *writeback.Writer
 	sealer *crypto.Sealer
 	logger zerolog.Logger
 }
 
 // NewManager creates a key pool manager and loads keys from the database. The
-// sealer opens (decrypts where tagged) bound secrets as keys are loaded.
-func NewManager(dbAdap db.DBAdapter, sealer *crypto.Sealer, logger zerolog.Logger) (*Manager, error) {
+// sealer opens (decrypts where tagged) bound secrets as keys are loaded; usage
+// writes go through the writeback writer, off the serve path.
+func NewManager(dbAdap db.DBAdapter, sealer *crypto.Sealer, usage *writeback.Writer, logger zerolog.Logger) (*Manager, error) {
 	m := &Manager{
 		rr:     NewRoundRobin(),
 		dbAdap: dbAdap,
+		usage:  usage,
 		sealer: sealer,
 		logger: logger.With().Str("component", "keypool").Logger(),
 	}
@@ -101,25 +105,18 @@ func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]boo
 	return nil
 }
 
-// persistUsage writes the cumulative usage change to the DB so a restart resumes
-// the count (the in-memory mutation already happened atomically in
-// TryConsumeUsage). When a windowed budget just rolled over (didReset), it
-// persists the reset (usage_count=1, fresh usage_window_start) instead of a plain
-// increment, keeping the DB consistent with the in-memory reset-then-increment.
+// persistUsage queues the cumulative usage change (the in-memory mutation already
+// happened atomically in TryConsumeUsage) so a restart resumes the count. A rolled
+// over window (didReset) queues the reset instead of an increment. The write lands
+// within a flush period; a crash loses at most that period's counts.
 // Single-replica assumption: under multiple replicas the in-memory count is
 // per-replica; only the DB count is authoritative.
 func (m *Manager) persistUsage(key *PoolKey, didReset bool, windowStart time.Time) {
-	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
-	defer cancel()
 	if didReset {
-		if err := m.dbAdap.ResetUsageWindow(ctx, key.ID, windowStart); err != nil {
-			m.logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to persist usage window reset")
-		}
+		m.usage.WindowReset(key.ID, windowStart)
 		return
 	}
-	if err := m.dbAdap.IncrementUsage(ctx, key.ID); err != nil {
-		m.logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to persist usage increment")
-	}
+	m.usage.Served(key.ID)
 }
 
 // ReloadKeys reads all keys from the database and rebuilds the pool.

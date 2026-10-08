@@ -86,7 +86,11 @@ func (s *Server) resolveKeyCaller(w http.ResponseWriter, r *http.Request) (keyCa
 
 	// Otherwise treat it as a consumer token: indexed lookup by sha256 hash, then
 	// a constant-time confirm of the hash to avoid a timing oracle on the index.
+	// A token resolved recently is answered from memory.
 	tokenHash := hashToken(token)
+	if caller, ok := s.Auth.get(tokenHash); ok {
+		return caller, true
+	}
 	ctx := r.Context()
 	consumer, err := s.DB.GetConsumerByTokenHash(ctx, tokenHash)
 	if err != nil {
@@ -110,7 +114,9 @@ func (s *Server) resolveKeyCaller(w http.ResponseWriter, r *http.Request) (keyCa
 	for _, id := range scopeIDs {
 		allowed[id] = true
 	}
-	return keyCaller{isAdmin: false, consumerID: consumer.ID, allowedTierIDs: allowed}, true
+	caller := keyCaller{isAdmin: false, consumerID: consumer.ID, allowedTierIDs: allowed}
+	s.Auth.put(tokenHash, caller)
+	return caller, true
 }
 
 // RequestLogger middleware logs each incoming request.

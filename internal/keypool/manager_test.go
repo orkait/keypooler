@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/orkait/keypooler/internal/db"
+	"github.com/orkait/keypooler/internal/writeback"
 
 	"github.com/rs/zerolog"
 )
@@ -42,21 +43,21 @@ func (n *noopDB) CreateConsumer(context.Context, *db.Consumer) error            
 func (n *noopDB) GetConsumerByTokenHash(context.Context, string) (*db.Consumer, error) {
 	return nil, nil
 }
-func (n *noopDB) GetAllConsumers(context.Context) ([]*db.Consumer, error)        { return nil, nil }
-func (n *noopDB) DeleteConsumer(context.Context, string) error                   { return nil }
-func (n *noopDB) AddConsumerScope(context.Context, string, string) error         { return nil }
-func (n *noopDB) GetConsumerScopes(context.Context, string) ([]string, error)    { return nil, nil }
-func (n *noopDB) RecordUsageEvent(context.Context, string, string, string) error { return nil }
+func (n *noopDB) GetAllConsumers(context.Context) ([]*db.Consumer, error)     { return nil, nil }
+func (n *noopDB) DeleteConsumer(context.Context, string) error                { return nil }
+func (n *noopDB) AddConsumerScope(context.Context, string, string) error      { return nil }
+func (n *noopDB) GetConsumerScopes(context.Context, string) ([]string, error) { return nil, nil }
+func (n *noopDB) RecordUsageEvents(context.Context, []*db.UsageEvent) error   { return nil }
 func (n *noopDB) ListUsageEvents(context.Context, int) ([]*db.UsageEvent, error) {
 	return nil, nil
 }
-func (n *noopDB) IncrementUsage(context.Context, string) error {
+func (n *noopDB) AddUsage(_ context.Context, _ string, count int) error {
 	n.mu.Lock()
-	n.inc++
+	n.inc += count
 	n.mu.Unlock()
 	return nil
 }
-func (n *noopDB) ResetUsageWindow(context.Context, string, time.Time) error {
+func (n *noopDB) ResetUsageWindow(context.Context, string, time.Time, int) error {
 	n.mu.Lock()
 	n.reset++
 	n.mu.Unlock()
@@ -79,6 +80,7 @@ func TestUsageLimitNoOverServeUnderConcurrency(t *testing.T) {
 		keys:   []*PoolKey{key},
 		rr:     NewRoundRobin(),
 		dbAdap: fake,
+		usage:  writeback.New(fake, zerolog.Nop()),
 		logger: zerolog.Nop(),
 	}
 
@@ -98,8 +100,12 @@ func TestUsageLimitNoOverServeUnderConcurrency(t *testing.T) {
 	if served != int32(limit) {
 		t.Fatalf("usage over/under-served: got %d, want exactly %d", served, limit)
 	}
+	if fake.inc != 0 {
+		t.Fatalf("a serve wrote to the database on the request path: %d", fake.inc)
+	}
+	m.usage.Flush(context.Background())
 	if fake.inc != limit {
-		t.Fatalf("usage not persisted exactly per serve: IncrementUsage called %d times, want %d", fake.inc, limit)
+		t.Fatalf("usage not persisted exactly per serve: %d persisted, want %d", fake.inc, limit)
 	}
 }
 
@@ -171,7 +177,7 @@ func TestUsageWindowResetResumesServing(t *testing.T) {
 		Features:           map[string]FeatureLimit{"f": {RateLimit: 100000, WindowSeconds: 60}},
 	}
 	fake := &noopDB{}
-	m := &Manager{keys: []*PoolKey{key}, rr: NewRoundRobin(), dbAdap: fake, logger: zerolog.Nop()}
+	m := &Manager{keys: []*PoolKey{key}, rr: NewRoundRobin(), dbAdap: fake, usage: writeback.New(fake, zerolog.Nop()), logger: zerolog.Nop()}
 
 	// First window: exactly `limit` serves, then exhausted.
 	for i := 0; i < limit; i++ {
@@ -190,6 +196,7 @@ func TestUsageWindowResetResumesServing(t *testing.T) {
 		t.Fatalf("key should serve again after the usage window reset")
 	}
 
+	m.usage.Flush(context.Background())
 	fake.mu.Lock()
 	resets := fake.reset
 	fake.mu.Unlock()
