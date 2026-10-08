@@ -58,6 +58,33 @@ func (f *fakeStore) ResetUsageWindow(context.Context, string, time.Time, int) er
 	return nil
 }
 
+func TestAReloadRefreshesAKeysFieldsAndKeepsItsRateWindow(t *testing.T) {
+	store := &fakeStore{
+		keys: []*db.Key{{ID: "k", Name: "before", TierID: "t", IsActive: true}},
+		features: map[string][]*db.TierFeature{
+			"t": {{TierID: "t", Feature: "chat", RateLimit: 1, WindowSeconds: 60}},
+		},
+	}
+	m := &Manager{rr: NewRoundRobin(), dbAdap: store, logger: zerolog.Nop()}
+	if err := m.ReloadKeys(); err != nil {
+		t.Fatal(err)
+	}
+	if m.GetKeyForFeature("chat", nil) == nil {
+		t.Fatal("first draw within the rate limit must serve")
+	}
+
+	store.keys = []*db.Key{{ID: "k", Name: "after", TierID: "t", IsActive: true}}
+	if err := m.ReloadKeys(); err != nil {
+		t.Fatal(err)
+	}
+	if m.GetKeyForFeature("chat", nil) != nil {
+		t.Fatal("a reload must not reset the rate window: the second draw is over the limit")
+	}
+	if got := m.GetHealthStatus()[0].Name; got != "after" {
+		t.Fatalf("name after reload %q, want %q", got, "after")
+	}
+}
+
 func TestAReloadReadsKeysFeaturesAndSecretsOnceHoweverManyKeys(t *testing.T) {
 	store := &fakeStore{features: map[string][]*db.TierFeature{
 		"served": {{TierID: "served", Feature: "chat", RateLimit: 10, WindowSeconds: 60}},

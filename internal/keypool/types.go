@@ -3,6 +3,8 @@ package keypool
 import (
 	"sync"
 	"time"
+
+	"github.com/orkait/keypooler/internal/db"
 )
 
 // FeatureLimit is a per-feature rate limit with a configurable window.
@@ -41,6 +43,25 @@ type PoolKey struct {
 
 	mu           sync.Mutex
 	rateCounters map[string]*rateCounter // feature -> counter
+}
+
+// load sets every field the database owns. Runtime state (the rate counters) is
+// left as it is, so a reload refreshes a key without resetting its windows.
+func (k *PoolKey) load(row *db.Key, features map[string]FeatureLimit, secrets map[string]string) {
+	k.ID = row.ID
+	k.Name = row.Name
+	k.KeyValue = row.KeyValue
+	k.TierID = row.TierID
+	k.IsActive = row.IsActive
+	k.ExpiresAt = row.ExpiresAt
+	k.UsageLimit = row.UsageLimit
+	k.UsageCount = row.UsageCount
+	k.UsageWindowSeconds = row.UsageWindowSeconds
+	k.UsageWindowStart = row.UsageWindowStart
+	k.ExhaustedUntil = row.ExhaustedUntil
+	k.Metadata = row.Metadata
+	k.Secrets = secrets
+	k.Features = features
 }
 
 type rateCounter struct {

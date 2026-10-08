@@ -147,14 +147,7 @@ func (m *Manager) ReloadKeys() error {
 	if err != nil {
 		return err
 	}
-	tierFeatures := make(map[string]map[string]FeatureLimit, len(byTier)) // tierID -> feature -> limit
-	for tierID, features := range byTier {
-		fm := make(map[string]FeatureLimit, len(features))
-		for _, f := range features {
-			fm[f.Feature] = FeatureLimit{RateLimit: f.RateLimit, WindowSeconds: f.WindowSeconds}
-		}
-		tierFeatures[tierID] = fm
-	}
+	tierFeatures := featureLimits(byTier)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -173,47 +166,31 @@ func (m *Manager) ReloadKeys() error {
 			continue
 		}
 
-		secrets := m.openSecrets(k.ID, byKey[k.ID])
-
-		if old, ok := existing[k.ID]; ok {
-			// Preserve runtime rate state, refresh DB-backed fields.
-			old.Name = k.Name
-			old.KeyValue = k.KeyValue
-			old.TierID = k.TierID
-			old.IsActive = k.IsActive
-			old.ExpiresAt = k.ExpiresAt
-			old.UsageLimit = k.UsageLimit
-			old.UsageCount = k.UsageCount
-			old.UsageWindowSeconds = k.UsageWindowSeconds
-			old.UsageWindowStart = k.UsageWindowStart
-			old.ExhaustedUntil = k.ExhaustedUntil
-			old.Metadata = k.Metadata
-			old.Secrets = secrets
-			old.Features = features
-			newKeys = append(newKeys, old)
-		} else {
-			newKeys = append(newKeys, &PoolKey{
-				ID:                 k.ID,
-				Name:               k.Name,
-				KeyValue:           k.KeyValue,
-				TierID:             k.TierID,
-				IsActive:           k.IsActive,
-				ExpiresAt:          k.ExpiresAt,
-				UsageLimit:         k.UsageLimit,
-				UsageCount:         k.UsageCount,
-				UsageWindowSeconds: k.UsageWindowSeconds,
-				UsageWindowStart:   k.UsageWindowStart,
-				ExhaustedUntil:     k.ExhaustedUntil,
-				Metadata:           k.Metadata,
-				Secrets:            secrets,
-				Features:           features,
-			})
+		// A key already in the pool keeps its object, and with it its rate counters.
+		key, ok := existing[k.ID]
+		if !ok {
+			key = &PoolKey{}
 		}
+		key.load(k, features, m.openSecrets(k.ID, byKey[k.ID]))
+		newKeys = append(newKeys, key)
 	}
 
 	m.keys = newKeys
 	m.logger.Debug().Int("key_count", len(m.keys)).Msg("key pool reloaded")
 	return nil
+}
+
+// featureLimits indexes each tier's features by name: tierID -> feature -> limit.
+func featureLimits(byTier map[string][]*db.TierFeature) map[string]map[string]FeatureLimit {
+	limits := make(map[string]map[string]FeatureLimit, len(byTier))
+	for tierID, features := range byTier {
+		byName := make(map[string]FeatureLimit, len(features))
+		for _, f := range features {
+			byName[f.Feature] = FeatureLimit{RateLimit: f.RateLimit, WindowSeconds: f.WindowSeconds}
+		}
+		limits[tierID] = byName
+	}
+	return limits
 }
 
 // openSecrets opens a key's bound secrets via the sealer (values tagged as
