@@ -5,42 +5,24 @@ import (
 	"time"
 )
 
-// DBAdapter defines the interface for keypooler database operations.
-// Keypooler owns tiers, tier features, API keys, consumers, and usage events.
 type DBAdapter interface {
 	Close() error
 
-	// Tiers
 	CreateTier(ctx context.Context, tier *Tier, features []*TierFeature) error
-	GetTier(ctx context.Context, id string) (*Tier, error)
 	GetTierByName(ctx context.Context, name string) (*Tier, error)
 	GetAllTiers(ctx context.Context) ([]*Tier, error)
-	DeleteTier(ctx context.Context, id string) error
 	UpdateTierDescription(ctx context.Context, id, description string) error
-
-	// Tier Features
 	SetTierFeatures(ctx context.Context, tierID string, features []*TierFeature) error
 	TierFeaturesByTier(ctx context.Context) (map[string][]*TierFeature, error)
 
-	// Keys
 	CreateKey(ctx context.Context, key *Key, secrets []*KeySecret) error
-	GetKey(ctx context.Context, id string) (*Key, error)
 	GetAllKeys(ctx context.Context) ([]*Key, error)
-	GetKeysByTier(ctx context.Context, tierID string) ([]*Key, error)
 	DeleteKey(ctx context.Context, id string) error
-	SetKeyActive(ctx context.Context, id string, active bool) error
-	// AddUsage adds n serves to usage_count.
 	AddUsage(ctx context.Context, keyID string, n int) error
-	// ResetUsageWindow sets usage_count to count and stamps a fresh
-	// usage_window_start. Used when a key's monthly (windowed) budget rolls over.
 	ResetUsageWindow(ctx context.Context, keyID string, start time.Time, count int) error
-	// SetKeyExhausted keeps the key out of rotation until `until`.
 	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
-
-	// Key Secrets
 	KeySecretsByKey(ctx context.Context) (map[string][]*KeySecret, error)
 
-	// Consumers
 	CreateConsumer(ctx context.Context, consumer *Consumer) error
 	GetConsumerByTokenHash(ctx context.Context, tokenHash string) (*Consumer, error)
 	GetAllConsumers(ctx context.Context) ([]*Consumer, error)
@@ -49,12 +31,10 @@ type DBAdapter interface {
 	GetConsumerScopes(ctx context.Context, consumerID string) ([]string, error)
 	ConsumerScopesByConsumer(ctx context.Context) (map[string][]string, error)
 
-	// Usage Events (audit)
 	RecordUsageEvents(ctx context.Context, events []*UsageEvent) error
 	ListUsageEvents(ctx context.Context, limit int) ([]*UsageEvent, error)
 }
 
-// Tier represents a key tier with feature rate limits.
 type Tier struct {
 	ID          string
 	Name        string
@@ -62,7 +42,6 @@ type Tier struct {
 	CreatedAt   time.Time
 }
 
-// TierFeature represents a feature rate limit within a tier.
 type TierFeature struct {
 	TierID        string
 	Feature       string
@@ -70,39 +49,28 @@ type TierFeature struct {
 	WindowSeconds int
 }
 
-// Key represents an API key in the pool.
 type Key struct {
-	ID         string
-	Name       string
-	KeyValue   string
-	TierID     string
-	IsActive   bool
-	ExpiresAt  *time.Time
-	UsageLimit *int
-	UsageCount int
-	// UsageWindowSeconds, when set, makes the usage_limit a per-window budget
-	// (e.g. 2592000 = 30 days). nil means the limit is a lifetime cap.
+	ID                 string
+	Name               string
+	KeyValue           string
+	TierID             string
+	IsActive           bool
+	ExpiresAt          *time.Time
+	UsageLimit         *int
+	UsageCount         int
 	UsageWindowSeconds *int
-	// UsageWindowStart is the start of the current usage window. nil until the
-	// first window opens.
-	UsageWindowStart *time.Time
-	// ExhaustedUntil, when set and in the future, keeps the key out of rotation: a
-	// consumer reported the provider refusing it for the rest of its billing period.
-	ExhaustedUntil *time.Time
-	Metadata       map[string]any
-	CreatedAt      time.Time
+	UsageWindowStart   *time.Time
+	ExhaustedUntil     *time.Time
+	Metadata           map[string]any
+	CreatedAt          time.Time
 }
 
-// KeySecret is a named secret bound to a key. Value is as stored: sealed when
-// encryption is on, plaintext otherwise.
 type KeySecret struct {
 	KeyID string
 	Name  string
 	Value string
 }
 
-// Consumer is a scoped API client. It authenticates with a bearer token whose
-// sha256 hash is stored; the plaintext token is shown exactly once at creation.
 type Consumer struct {
 	ID          string
 	Name        string
@@ -112,7 +80,6 @@ type Consumer struct {
 	CreatedAt   time.Time
 }
 
-// UsageEvent is an append-only audit record written on each successful key serve.
 type UsageEvent struct {
 	ID         string
 	KeyID      string

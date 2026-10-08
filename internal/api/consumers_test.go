@@ -14,8 +14,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// failingCreates refuses every create with err; any other call panics on the nil
-// embedded interface.
 type failingCreates struct {
 	db.DBAdapter
 	err error

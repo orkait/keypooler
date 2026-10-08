@@ -15,20 +15,16 @@ import (
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/keypool"
-	"github.com/orkait/keypooler/internal/util"
 	"github.com/orkait/keypooler/internal/writeback"
 
 	"github.com/rs/zerolog"
 )
 
 const (
-	// How often usage counts and audit events land; a crash loses at most this much.
-	writebackPeriod = time.Second
-	// How long a resolved consumer token is trusted without a lookup. Admin writes
-	// clear it sooner.
-	authCacheTTL = time.Minute
-	// Where the image puts the SQL migrations, relative to the working directory.
-	migrationsDir = "./migrations"
+	writebackPeriod  = time.Second
+	authCacheTTL     = time.Minute
+	migrationTimeout = 5 * time.Second
+	migrationsDir    = "./migrations"
 )
 
 func main() {
@@ -65,18 +61,16 @@ func main() {
 		Logger: logger,
 	})
 	serveUntilSignalled(cfg, handler, logger)
-	// No request is in flight now; the last flush writes what they left.
 	stopWriteback()
 	logger.Info().Msg("keypooler stopped")
 }
 
-// openStore connects to Postgres and brings the schema up to date, or exits.
 func openStore(cfg *config.Config, logger zerolog.Logger) *db.PostgresAdapter {
 	store, err := db.NewPostgresAdapter(cfg.DatabaseURL, cfg.DBMaxOpenConns)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize database")
 	}
-	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTimeout)
 	defer cancel()
 	if err := db.RunMigrations(ctx, store.Pool(), migrationsDir); err != nil {
 		logger.Fatal().Err(err).Msg("failed to run migrations")
@@ -85,8 +79,6 @@ func openStore(cfg *config.Config, logger zerolog.Logger) *db.PostgresAdapter {
 	return store
 }
 
-// startWriteback runs the usage writer in the background; stop flushes what is
-// left and waits for it.
 func startWriteback(store writeback.Store, logger zerolog.Logger) (*writeback.Writer, func()) {
 	usage := writeback.New(store, logger)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,8 +93,6 @@ func startWriteback(store writeback.Store, logger zerolog.Logger) (*writeback.Wr
 	}
 }
 
-// serveUntilSignalled serves until SIGINT or SIGTERM, then drains in-flight
-// requests within the configured shutdown timeout.
 func serveUntilSignalled(cfg *config.Config, handler http.Handler, logger zerolog.Logger) {
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.ServerPort),

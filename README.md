@@ -191,7 +191,6 @@ internal/
   crypto/                AES-256-GCM + Sealer (opt-in, self-tagged)
   db/                    Postgres adapter (pgx pool), migrations
   keypool/               round-robin pool, rate + usage budgets
-  util/                  db context helpers
   writeback/             usage counts and audit events, flushed behind the serve
 migrations/001_init.sql  consolidated schema
 ```

@@ -17,8 +17,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// keyStore answers what adding a key reads and records what it writes; any
-// other call panics on the nil embedded interface.
 type keyStore struct {
 	db.DBAdapter
 	created *db.Key

@@ -11,28 +11,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// GetKey handles GET /key?feature=X
-// Returns the API key value (decrypted if stored encrypted) for the given
-// feature, or 429 if none available.
-//
-// Auth is admin-OR-consumer (resolved by resolveKeyCaller, NOT AdminAuth):
-//   - admin token  -> superuser, may fetch any tier's keys (nil scope filter),
-//     consumer id recorded as "admin".
-//   - consumer token -> may fetch only keys whose tier is in its consumer_scopes.
-//     401 for an unknown/inactive token; 403 when no scoped tier serves the
-//     feature with budget.
 func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.resolveKeyCaller(w, r)
 	if !ok {
-		return // resolveKeyCaller already wrote the 401
+		return
 	}
-
 	feature := r.URL.Query().Get("feature")
 	if feature == "" {
 		writeError(w, http.StatusBadRequest, "feature query param required")
 		return
 	}
-
 	key, err := s.Pool.GetKeyForFeature(feature, caller.allowedTierIDs)
 	if errors.Is(err, keypool.ErrOutOfScope) && caller.allowedTierIDs != nil {
 		writeError(w, http.StatusForbidden, err.Error())
@@ -42,16 +30,13 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, keypool.ErrExhausted.Error())
 		return
 	}
-
 	value, err := s.Sealer.Open(key.KeyValue)
 	if err != nil {
 		s.Logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to open key value")
 		writeError(w, http.StatusInternalServerError, "failed to read key")
 		return
 	}
-
 	s.Usage.Event(db.NewUsageEvent(key.ID, caller.consumerID, feature))
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"key_id":   key.ID,
 		"value":    value,
@@ -60,7 +45,6 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// addKeyBody is what POST /admin/keys takes.
 type addKeyBody struct {
 	Name               string            `json:"name"`
 	Key                string            `json:"key"`
@@ -72,8 +56,6 @@ type addKeyBody struct {
 	Secrets            map[string]string `json:"secrets"`
 }
 
-// decodeAddKey reads the request, requires name, key and tier, and parses the
-// optional expiry.
 func decodeAddKey(w http.ResponseWriter, r *http.Request) (addKeyBody, *time.Time, bool) {
 	var body addKeyBody
 	if err := decodeJSON(r, &body); err != nil {
@@ -95,16 +77,10 @@ func decodeAddKey(w http.ResponseWriter, r *http.Request) (addKeyBody, *time.Tim
 	return body, &expiresAt, true
 }
 
-// sealedRows builds the key row and its secret rows, each value sealed (encrypted
-// iff encryption is enabled) before it is stored.
 func (s *Server) sealedRows(body addKeyBody, tierID string, expiresAt *time.Time) (*db.Key, []*db.KeySecret, error) {
 	sealedKey, err := s.Sealer.Seal(body.Key)
 	if err != nil {
 		return nil, nil, err
-	}
-	metadata := body.Metadata
-	if metadata == nil {
-		metadata = map[string]any{}
 	}
 	key := &db.Key{
 		ID:                 uuid.New().String(),
@@ -115,7 +91,10 @@ func (s *Server) sealedRows(body addKeyBody, tierID string, expiresAt *time.Time
 		ExpiresAt:          expiresAt,
 		UsageLimit:         body.UsageLimit,
 		UsageWindowSeconds: body.UsageWindowSeconds,
-		Metadata:           metadata,
+		Metadata:           body.Metadata,
+	}
+	if key.Metadata == nil {
+		key.Metadata = map[string]any{}
 	}
 	secrets := make([]*db.KeySecret, 0, len(body.Secrets))
 	for name, value := range body.Secrets {
@@ -128,7 +107,6 @@ func (s *Server) sealedRows(body addKeyBody, tierID string, expiresAt *time.Time
 	return key, secrets, nil
 }
 
-// AddKey handles POST /admin/keys
 func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 	body, expiresAt, ok := decodeAddKey(w, r)
 	if !ok {
@@ -153,9 +131,7 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create key")
 		return
 	}
-	if err := s.Pool.ReloadKeys(); err != nil {
-		s.Logger.Error().Err(err).Msg("failed to reload key pool after adding key")
-	}
+	s.reload("adding key")
 
 	secretNames := make([]string, 0, len(secrets))
 	for _, sec := range secrets {
@@ -173,18 +149,19 @@ func (s *Server) AddKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListKeys handles GET /admin/keys
+func (s *Server) reload(after string) {
+	if err := s.Pool.ReloadKeys(); err != nil {
+		s.Logger.Error().Err(err).Msg("failed to reload key pool after " + after)
+	}
+}
+
 func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 	statuses := s.Pool.GetHealthStatus()
 	result := make([]map[string]any, len(statuses))
 	for i, ks := range statuses {
-		usage := make(map[string]any)
+		usage := make(map[string]any, len(ks.Usage))
 		for feature, info := range ks.Usage {
-			usage[feature] = map[string]any{
-				"used":           info.Used,
-				"limit":          info.Limit,
-				"window_seconds": info.WindowSeconds,
-			}
+			usage[feature] = map[string]any{"used": info.Used, "limit": info.Limit, "window_seconds": info.WindowSeconds}
 		}
 		result[i] = map[string]any{
 			"id":              ks.ID,
@@ -203,10 +180,6 @@ func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// ExhaustKey handles POST /key/{id}/exhausted with body {"until": RFC3339}.
-// A consumer reports a key the provider refused for the rest of its billing
-// period; the pool stops serving it until then and resumes on its own. Auth is
-// admin-OR-consumer like GetKey; a consumer may only report keys in its scope.
 func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.resolveKeyCaller(w, r)
 	if !ok {
@@ -242,21 +215,15 @@ func (s *Server) ExhaustKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// DeleteKey handles DELETE /admin/keys/{id}
 func (s *Server) DeleteKey(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	if err := s.DB.DeleteKey(ctx, r.PathValue(pathID)); err != nil {
+	if err := s.DB.DeleteKey(r.Context(), r.PathValue(pathID)); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete key")
 		return
 	}
-
-	if err := s.Pool.ReloadKeys(); err != nil {
-		s.Logger.Error().Err(err).Msg("failed to reload key pool after deleting key")
-	}
+	s.reload("deleting key")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// rfc3339OrNil renders an optional time for JSON: the UTC timestamp, or null.
 func rfc3339OrNil(t *time.Time) any {
 	if t == nil {
 		return nil
