@@ -15,20 +15,16 @@ import (
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/keypool"
-	"github.com/orkait/keypooler/internal/util"
 	"github.com/orkait/keypooler/internal/writeback"
 
 	"github.com/rs/zerolog"
 )
 
 const (
-	// How often usage counts and audit events land; a crash loses at most this much.
-	writebackPeriod = time.Second
-	// How long a resolved consumer token is trusted without a lookup. Admin writes
-	// clear it sooner.
-	authCacheTTL = time.Minute
-	// Where the image puts the SQL migrations, relative to the working directory.
-	migrationsDir = "./migrations"
+	writebackPeriod  = time.Second
+	authCacheTTL     = time.Minute
+	migrationTimeout = 5 * time.Second
+	migrationsDir    = "./migrations"
 )
 
 func main() {
@@ -37,7 +33,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		os.Exit(1)
 	}
-	logger := newLogger(cfg)
+	logger := zerolog.New(os.Stdout).Level(zerolog.InfoLevel).With().Timestamp().Logger()
 	logger.Info().Msg("starting keypooler")
 
 	store := openStore(cfg, logger)
@@ -56,27 +52,25 @@ func main() {
 	logger.Info().Int("pool_size", pool.PoolSize()).Bool("encryption", sealer.Enabled()).Msg("key pool initialized")
 
 	handler := api.NewRouter(&api.Server{
-		DB:     store,
-		Pool:   pool,
-		Usage:  usage,
-		Auth:   api.NewAuthCache(authCacheTTL),
-		Cfg:    cfg,
-		Sealer: sealer,
-		Logger: logger,
+		DB:         store,
+		Pool:       pool,
+		Usage:      usage,
+		Auth:       api.NewAuthCache(authCacheTTL),
+		AdminToken: cfg.AdminToken,
+		Sealer:     sealer,
+		Logger:     logger,
 	})
-	serveUntilSignalled(cfg, handler, logger)
-	// No request is in flight now; the last flush writes what they left.
+	serveUntilSignalled(handler, logger)
 	stopWriteback()
 	logger.Info().Msg("keypooler stopped")
 }
 
-// openStore connects to Postgres and brings the schema up to date, or exits.
 func openStore(cfg *config.Config, logger zerolog.Logger) *db.PostgresAdapter {
-	store, err := db.NewPostgresAdapter(cfg.DatabaseURL, cfg.DBMaxOpenConns)
+	store, err := db.NewPostgresAdapter(cfg.DatabaseURL, config.MaxDBConns)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize database")
 	}
-	ctx, cancel := util.DBContext(context.Background(), util.DBTimeoutLong)
+	ctx, cancel := context.WithTimeout(context.Background(), migrationTimeout)
 	defer cancel()
 	if err := db.RunMigrations(ctx, store.Pool(), migrationsDir); err != nil {
 		logger.Fatal().Err(err).Msg("failed to run migrations")
@@ -85,8 +79,6 @@ func openStore(cfg *config.Config, logger zerolog.Logger) *db.PostgresAdapter {
 	return store
 }
 
-// startWriteback runs the usage writer in the background; stop flushes what is
-// left and waits for it.
 func startWriteback(store writeback.Store, logger zerolog.Logger) (*writeback.Writer, func()) {
 	usage := writeback.New(store, logger)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,21 +93,19 @@ func startWriteback(store writeback.Store, logger zerolog.Logger) (*writeback.Wr
 	}
 }
 
-// serveUntilSignalled serves until SIGINT or SIGTERM, then drains in-flight
-// requests within the configured shutdown timeout.
-func serveUntilSignalled(cfg *config.Config, handler http.Handler, logger zerolog.Logger) {
+func serveUntilSignalled(handler http.Handler, logger zerolog.Logger) {
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.ServerPort),
+		Addr:         config.Addr,
 		Handler:      handler,
-		ReadTimeout:  cfg.ServerReadTimeout,
-		WriteTimeout: cfg.ServerWriteTimeout,
-		IdleTimeout:  cfg.ServerIdleTimeout,
+		ReadTimeout:  config.ReadTimeout,
+		WriteTimeout: config.WriteTimeout,
+		IdleTimeout:  config.IdleTimeout,
 	}
 	signalled, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
-		logger.Info().Int("port", cfg.ServerPort).Msg("HTTP server listening")
+		logger.Info().Str("addr", config.Addr).Msg("HTTP server listening")
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatal().Err(err).Msg("HTTP server error")
 		}
@@ -123,23 +113,9 @@ func serveUntilSignalled(cfg *config.Config, handler http.Handler, logger zerolo
 	<-signalled.Done()
 	logger.Info().Msg("shutdown signal received")
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.ServerShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), config.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error().Err(err).Msg("HTTP server shutdown error")
 	}
-}
-
-func newLogger(cfg *config.Config) zerolog.Logger {
-	level, err := zerolog.ParseLevel(cfg.LogLevel)
-	if err != nil {
-		level = zerolog.InfoLevel
-	}
-	var logger zerolog.Logger
-	if cfg.LogFormat == config.LogFormatPretty {
-		logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout})
-	} else {
-		logger = zerolog.New(os.Stdout)
-	}
-	return logger.Level(level).With().Timestamp().Logger()
 }

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/keypool"
@@ -17,8 +16,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// keyStore answers what adding a key reads and records what it writes; any
-// other call panics on the nil embedded interface.
 type keyStore struct {
 	db.DBAdapter
 	created *db.Key
@@ -57,10 +54,10 @@ func addKey(t *testing.T, body string) (*keyStore, *httptest.ResponseRecorder) {
 	}
 	h := NewRouter(&Server{
 		DB: store, Pool: pool, Sealer: sealer, Logger: zerolog.Nop(),
-		Cfg: &config.Config{AdminToken: adminToken}, Auth: NewAuthCache(time.Minute),
+		AdminToken: adminToken, Auth: NewAuthCache(time.Minute),
 	})
 	r := httptest.NewRequest(http.MethodPost, "/admin/keys", strings.NewReader(body))
-	r.Header.Set("Authorization", "Bearer "+adminToken)
+	r.Header.Set(headerAuthorization, bearer(adminToken))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return store, w
@@ -84,6 +81,40 @@ func TestAKeyIsStoredWithItsTierLimitsAndSecretsAndEchoedWithoutThem(t *testing.
 	_ = json.Unmarshal(w.Body.Bytes(), &echoed)
 	if echoed["id"] != k.ID || echoed["secret_names"].([]any)[0] != "webhook" || echoed["key"] != nil {
 		t.Fatalf("echoed %v", echoed)
+	}
+}
+
+type poolStore struct{ consumerDB }
+
+func (*poolStore) GetAllKeys(context.Context) ([]*db.Key, error) {
+	return []*db.Key{{ID: "k", KeyValue: "v", TierID: "groq_chat", IsActive: true}}, nil
+}
+
+func (*poolStore) TierFeaturesByTier(context.Context) (map[string][]*db.TierFeature, error) {
+	return map[string][]*db.TierFeature{"groq_chat": {{TierID: "groq_chat", Feature: "spent", RateLimit: 0, WindowSeconds: 60}}}, nil
+}
+
+func (*poolStore) KeySecretsByKey(context.Context) (map[string][]*db.KeySecret, error) {
+	return nil, nil
+}
+
+func TestAScopedConsumerIsForbiddenOutOfScopeAndThrottledWhenSpent(t *testing.T) {
+	store := &poolStore{consumerDB{active: true}}
+	sealer, _ := crypto.NewSealer("")
+	pool, err := keypool.NewManager(store, sealer, writeback.New(nil, zerolog.Nop()), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := authServer(&store.consumerDB)
+	s.DB, s.Pool, s.Sealer = store, pool, sealer
+	for feature, want := range map[string]int{"spent": http.StatusTooManyRequests, "elsewhere": http.StatusForbidden} {
+		r := httptest.NewRequest(http.MethodGet, "/key?feature="+feature, nil)
+		r.Header.Set(headerAuthorization, bearer(consumerToken))
+		w := httptest.NewRecorder()
+		NewRouter(s).ServeHTTP(w, r)
+		if w.Code != want {
+			t.Errorf("feature %s answered %d, want %d", feature, w.Code, want)
+		}
 	}
 }
 

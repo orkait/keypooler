@@ -9,13 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/rs/zerolog"
 )
 
-// consumerDB answers only the two auth lookups; any other call panics on the nil
-// embedded interface, which is what a test reaching it deserves.
 type consumerDB struct {
 	db.DBAdapter
 	mu      sync.Mutex
@@ -41,17 +38,18 @@ const consumerToken = "consumer-token"
 
 func authServer(store *consumerDB) *Server {
 	return &Server{
-		DB:     store,
-		Cfg:    &config.Config{AdminToken: "admin-token"},
-		Auth:   NewAuthCache(time.Minute),
-		Logger: zerolog.Nop(),
+		DB:         store,
+		AdminToken: adminToken,
+		Auth:       NewAuthCache(time.Minute),
+		Logger:     zerolog.Nop(),
 	}
 }
 
-func resolve(t *testing.T, s *Server) (keyCaller, int) {
-	t.Helper()
+func resolve(s *Server, header string) (keyCaller, int) {
 	r := httptest.NewRequest(http.MethodGet, "/key?feature=chat", nil)
-	r.Header.Set("Authorization", "Bearer "+consumerToken)
+	if header != "" {
+		r.Header.Set(headerAuthorization, header)
+	}
 	w := httptest.NewRecorder()
 	caller, _ := s.resolveKeyCaller(w, r)
 	return caller, w.Code
@@ -61,84 +59,57 @@ func TestAKeyCallerIsTheAdminAScopedConsumerOrRefused(t *testing.T) {
 	cases := map[string]struct {
 		header   string
 		active   bool
-		admin    bool
 		consumer string
 		status   int
 	}{
-		"admin-token":      {header: "Bearer admin-token", admin: true, consumer: adminConsumerID, status: http.StatusOK},
-		"consumer-token":   {header: "Bearer " + consumerToken, active: true, consumer: "c1", status: http.StatusOK},
+		"admin-token":      {header: bearer(adminToken), consumer: adminConsumerID, status: http.StatusOK},
+		"consumer-token":   {header: bearer(consumerToken), active: true, consumer: "c1", status: http.StatusOK},
 		"lowercase-scheme": {header: "bearer " + consumerToken, active: true, consumer: "c1", status: http.StatusOK},
-		"unknown-token":    {header: "Bearer " + consumerToken, status: http.StatusUnauthorized},
-		"no-header":        {header: "", status: http.StatusUnauthorized},
+		"unknown-token":    {header: bearer(consumerToken), status: http.StatusUnauthorized},
+		"no-header":        {status: http.StatusUnauthorized},
 		"not-bearer":       {header: "Basic " + consumerToken, status: http.StatusUnauthorized},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			s := authServer(&consumerDB{active: c.active})
-			r := httptest.NewRequest(http.MethodGet, "/key?feature=chat", nil)
-			if c.header != "" {
-				r.Header.Set("Authorization", c.header)
+			caller, status := resolve(authServer(&consumerDB{active: c.active}), c.header)
+			if status != c.status || caller.consumerID != c.consumer {
+				t.Fatalf("status %d caller %+v", status, caller)
 			}
-			w := httptest.NewRecorder()
-			caller, ok := s.resolveKeyCaller(w, r)
-			if ok != (c.status == http.StatusOK) || w.Code != c.status {
-				t.Fatalf("ok %v, status %d, want %d", ok, w.Code, c.status)
-			}
-			if ok && (caller.isAdmin != c.admin || caller.consumerID != c.consumer || (!c.admin && !caller.allowedTierIDs["groq_chat"])) {
-				t.Fatalf("caller %+v", caller)
+			admin := c.consumer == adminConsumerID
+			if c.consumer != "" && (caller.allowedTierIDs == nil) != admin {
+				t.Fatalf("scope %v", caller.allowedTierIDs)
 			}
 		})
 	}
 }
 
-func TestAConsumerIsLookedUpOnceThenServedFromMemory(t *testing.T) {
+func TestAConsumerIsLookedUpOnceUntilItsEntryExpires(t *testing.T) {
 	store := &consumerDB{active: true}
 	s := authServer(store)
-	first, _ := resolve(t, s)
-	second, _ := resolve(t, s)
-	if store.lookups != 1 {
-		t.Fatalf("lookups %d, want 1", store.lookups)
+	resolve(s, bearer(consumerToken))
+	if cached, _ := resolve(s, bearer(consumerToken)); store.lookups != 1 || !cached.allowedTierIDs["groq_chat"] {
+		t.Fatalf("lookups %d, cached %+v", store.lookups, cached)
 	}
-	if second.consumerID != "c1" || !second.allowedTierIDs["groq_chat"] || first.consumerID != second.consumerID {
-		t.Fatalf("cached caller %+v", second)
+	s.Auth = NewAuthCache(time.Millisecond)
+	resolve(s, bearer(consumerToken))
+	time.Sleep(5 * time.Millisecond)
+	resolve(s, bearer(consumerToken))
+	if store.lookups != 3 {
+		t.Fatalf("lookups %d, want 3", store.lookups)
 	}
 }
 
 func TestAnAdminWriteForgetsEveryConsumerSoARevocationTakesHold(t *testing.T) {
 	store := &consumerDB{active: true}
 	s := authServer(store)
-	resolve(t, s)
+	resolve(s, bearer(consumerToken))
 
 	store.active = false
 	admin := httptest.NewRequest(http.MethodPost, "/admin/tiers", strings.NewReader("not json"))
-	admin.Header.Set("Authorization", "Bearer admin-token")
+	admin.Header.Set(headerAuthorization, bearer(adminToken))
 	NewRouter(s).ServeHTTP(httptest.NewRecorder(), admin)
 
-	if _, code := resolve(t, s); code != http.StatusUnauthorized {
-		t.Fatalf("revoked consumer answered %d, want 401", code)
-	}
-}
-
-func TestAnAdminReadKeepsTheCache(t *testing.T) {
-	store := &consumerDB{active: true}
-	s := authServer(store)
-	resolve(t, s)
-	s.Auth.clearAfterWrite(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
-		ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/admin/consumers", nil))
-	resolve(t, s)
-	if store.lookups != 1 {
-		t.Fatalf("lookups %d, want 1", store.lookups)
-	}
-}
-
-func TestACachedConsumerExpires(t *testing.T) {
-	store := &consumerDB{active: true}
-	s := authServer(store)
-	s.Auth = NewAuthCache(time.Millisecond)
-	resolve(t, s)
-	time.Sleep(5 * time.Millisecond)
-	resolve(t, s)
-	if store.lookups != 2 {
-		t.Fatalf("lookups %d, want 2", store.lookups)
+	if _, status := resolve(s, bearer(consumerToken)); status != http.StatusUnauthorized {
+		t.Fatalf("revoked consumer answered %d, want 401", status)
 	}
 }

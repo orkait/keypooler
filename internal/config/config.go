@@ -1,77 +1,58 @@
 package config
 
 import (
-	"fmt"
+	"errors"
+	"os"
+	"strings"
 	"time"
 )
 
-// Config holds all keypooler configuration loaded from environment variables.
+const (
+	envAdminToken    = "ADMIN_TOKEN"
+	envDatabaseURL   = "DATABASE_URL"
+	envEncryptionKey = "ENCRYPTION_KEY"
+
+	Addr            = ":8080"
+	ReadTimeout     = 30 * time.Second
+	WriteTimeout    = 30 * time.Second
+	IdleTimeout     = 120 * time.Second
+	ShutdownTimeout = 30 * time.Second
+	MaxDBConns      = 4
+)
+
+var postgresSchemes = []string{"postgres://", "postgresql://"}
+
+var (
+	ErrNoAdminToken = errors.New(envAdminToken + " is required - generate with: openssl rand -hex 32")
+	ErrDatabaseURL  = errors.New(envDatabaseURL + " must be a postgres:// URL")
+)
+
 type Config struct {
-	// Server
-	ServerPort            int
-	ServerReadTimeout     time.Duration
-	ServerWriteTimeout    time.Duration
-	ServerIdleTimeout     time.Duration
-	ServerShutdownTimeout time.Duration
-
-	// Database
-	DatabaseURL    string // postgres:// URL
-	DBMaxOpenConns int
-
-	// Security
+	DatabaseURL   string
 	EncryptionKey string
 	AdminToken    string
-
-	// Logging
-	LogLevel    string
-	LogFormat   string
-	LogRequests bool
 }
 
-// Load reads configuration from environment variables.
 func Load() (*Config, error) {
 	cfg := &Config{
-		ServerPort:            getEnvAsInt("SERVER_PORT", 8080),
-		ServerReadTimeout:     getEnvAsDuration("SERVER_READ_TIMEOUT_SECONDS", 30, time.Second),
-		ServerWriteTimeout:    getEnvAsDuration("SERVER_WRITE_TIMEOUT_SECONDS", 30, time.Second),
-		ServerIdleTimeout:     getEnvAsDuration("SERVER_IDLE_TIMEOUT_SECONDS", 120, time.Second),
-		ServerShutdownTimeout: getEnvAsDuration("SERVER_SHUTDOWN_TIMEOUT_SECONDS", 30, time.Second),
-
-		DatabaseURL:    getEnv("DATABASE_URL", ""),
-		DBMaxOpenConns: getEnvAsInt("DB_MAX_OPEN_CONNS", 4),
-
-		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
-		AdminToken:    getEnv("ADMIN_TOKEN", ""),
-
-		LogLevel:  getEnv("LOG_LEVEL", defaultLogLevel),
-		LogFormat: getEnv("LOG_FORMAT", LogFormatJSON),
-		// Off by default: every serve is already a usage_events row, and a line per
-		// draw is the bulk of the service's log volume.
-		LogRequests: getEnvAsBool("LOG_REQUESTS", false),
+		DatabaseURL:   os.Getenv(envDatabaseURL),
+		EncryptionKey: os.Getenv(envEncryptionKey),
+		AdminToken:    os.Getenv(envAdminToken),
 	}
-
-	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("config validation failed: %w", err)
+	if cfg.AdminToken == "" {
+		return nil, ErrNoAdminToken
 	}
-
+	if !hasAnyPrefix(cfg.DatabaseURL, postgresSchemes) {
+		return nil, ErrDatabaseURL
+	}
 	return cfg, nil
 }
 
-func (c *Config) validate() error {
-	if err := validateEncryptionKey(c.EncryptionKey); err != nil {
-		return err
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
 	}
-	if err := validateAdminToken(c.AdminToken); err != nil {
-		return err
-	}
-	if err := validateDatabaseURL(c.DatabaseURL); err != nil {
-		return err
-	}
-	if err := validateLogLevel(c.LogLevel); err != nil {
-		return err
-	}
-	if err := validateLogFormat(c.LogFormat); err != nil {
-		return err
-	}
-	return nil
+	return false
 }

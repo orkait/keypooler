@@ -16,14 +16,12 @@ import (
 
 const migrationSuffix = ".sql"
 
-// migration is one numbered SQL file.
 type migration struct {
 	version int
 	name    string
 	sql     string
 }
 
-// RunMigrations executes all pending migrations in order
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsPath string) error {
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -39,13 +37,17 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsPath strin
 		return fmt.Errorf("failed to load migrations: %w", err)
 	}
 
-	applied, err := getAppliedMigrations(ctx, pool)
+	rows, err := pool.Query(ctx, "SELECT version FROM schema_migrations")
+	if err != nil {
+		return fmt.Errorf("failed to get applied migrations: %w", err)
+	}
+	applied, err := pgx.CollectRows(rows, pgx.RowTo[int])
 	if err != nil {
 		return fmt.Errorf("failed to get applied migrations: %w", err)
 	}
 
 	for _, m := range migrations {
-		if applied[m.version] {
+		if slices.Contains(applied, m.version) {
 			continue
 		}
 		if err := executeMigration(ctx, pool, m); err != nil {
@@ -55,7 +57,6 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsPath strin
 	return nil
 }
 
-// loadMigrations reads every migration file in dir, in version order.
 func loadMigrations(dir string) ([]migration, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -82,7 +83,6 @@ func loadMigrations(dir string) ([]migration, error) {
 	return migrations, nil
 }
 
-// parseMigrationName reads "001_init.sql" as version 1 named "init".
 func parseMigrationName(filename string) (int, string, error) {
 	prefix, name, ok := strings.Cut(strings.TrimSuffix(filename, migrationSuffix), "_")
 	version, err := strconv.Atoi(prefix)
@@ -92,25 +92,6 @@ func parseMigrationName(filename string) (int, string, error) {
 	return version, name, nil
 }
 
-// getAppliedMigrations returns a set of already applied migration versions
-func getAppliedMigrations(ctx context.Context, pool *pgxpool.Pool) (map[int]bool, error) {
-	rows, err := pool.Query(ctx, "SELECT version FROM schema_migrations")
-	if err != nil {
-		return nil, err
-	}
-	versions, err := pgx.CollectRows(rows, pgx.RowTo[int])
-	if err != nil {
-		return nil, err
-	}
-	applied := make(map[int]bool, len(versions))
-	for _, v := range versions {
-		applied[v] = true
-	}
-	return applied, nil
-}
-
-// executeMigration runs a single migration within a transaction. The file may hold
-// several statements, so it goes over the simple protocol, which takes them as one.
 func executeMigration(ctx context.Context, pool *pgxpool.Pool, m migration) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -118,7 +99,7 @@ func executeMigration(ctx context.Context, pool *pgxpool.Pool, m migration) erro
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Conn().PgConn().Exec(ctx, m.sql).ReadAll(); err != nil {
+	if err := execScript(ctx, tx, m.sql); err != nil {
 		return fmt.Errorf("failed to execute SQL: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
@@ -128,4 +109,9 @@ func executeMigration(ctx context.Context, pool *pgxpool.Pool, m migration) erro
 		return fmt.Errorf("failed to record migration: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+func execScript(ctx context.Context, tx pgx.Tx, script string) error {
+	_, err := tx.Conn().PgConn().Exec(ctx, script).ReadAll()
+	return err
 }

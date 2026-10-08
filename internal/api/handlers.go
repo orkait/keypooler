@@ -1,9 +1,10 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
+	"strconv"
 
-	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/keypool"
@@ -12,27 +13,43 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Server holds all dependencies needed by HTTP handlers. The handlers live by
-// resource: keys.go, tiers.go, consumers.go.
 type Server struct {
-	DB     db.DBAdapter
-	Pool   *keypool.Manager
-	Usage  *writeback.Writer
-	Auth   *AuthCache
-	Cfg    *config.Config
-	Sealer *crypto.Sealer
-	Logger zerolog.Logger
+	DB         db.DBAdapter
+	Pool       *keypool.Manager
+	Usage      *writeback.Writer
+	Auth       *AuthCache
+	AdminToken string
+	Sealer     *crypto.Sealer
+	Logger     zerolog.Logger
 }
 
-// HealthCheck handles GET /health, the unauthenticated liveness probe.
 func (s *Server) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, statusBody{Status: statusOK})
 }
 
-// Health handles GET /admin/health
 func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"pool_size":  s.Pool.PoolSize(),
-		"encryption": s.Sealer.Enabled(),
-	})
+	writeJSON(w, http.StatusOK, poolHealth{PoolSize: s.Pool.PoolSize(), Encryption: s.Sealer.Enabled()})
+}
+
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set(headerContentType, mediaJSON)
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, errorBody{Error: message})
+}
+
+func decodeJSON(r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxBodySize)
+	return json.NewDecoder(r.Body).Decode(dst)
+}
+
+func parseLimit(raw string, def, max int) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return min(n, max)
 }
