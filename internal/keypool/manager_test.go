@@ -250,3 +250,24 @@ func TestAnElapsedUsageWindowRollsOverAndThatIsPersisted(t *testing.T) {
 		t.Fatalf("window resets persisted %d, want 1", store.reset)
 	}
 }
+
+func TestASyncSeesEveryActiveKeyOfAFeatureAndItsBalanceIsListed(t *testing.T) {
+	later := time.Now().Add(time.Hour)
+	features := map[string]FeatureLimit{"scrape": {RateLimit: 10, WindowSeconds: 60}}
+	m, _ := pooled(
+		&PoolKey{ID: "serving", KeyValue: "v1", IsActive: true, Features: features},
+		&PoolKey{ID: "benched", KeyValue: "v2", IsActive: true, ExhaustedUntil: &later, Features: features},
+		&PoolKey{ID: "off", KeyValue: "v3", Features: features},
+		&PoolKey{ID: "other", KeyValue: "v4", IsActive: true, Features: map[string]FeatureLimit{"search": {RateLimit: 10, WindowSeconds: 60}}},
+	)
+	held := m.Holding("scrape")
+	if len(held) != 2 || held[0] != (Held{ID: "serving", KeyValue: "v1"}) || held[1].ID != "benched" {
+		t.Fatalf("held %+v", held)
+	}
+	m.SetBalance("serving", Balance{Used: 4, Limit: 1000, Unit: UnitCredits})
+	for _, h := range m.GetHealthStatus() {
+		if (h.Balance != nil) != (h.ID == "serving") || (h.Balance != nil && h.Balance.Used != 4) {
+			t.Fatalf("%s balance %+v", h.ID, h.Balance)
+		}
+	}
+}

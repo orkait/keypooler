@@ -1,6 +1,10 @@
 package api
 
-import "time"
+import (
+	"time"
+
+	"github.com/orkait/keypooler/internal/keypool"
+)
 
 type errorBody struct {
 	Error string `json:"error"`
@@ -52,9 +56,25 @@ type listedKey struct {
 	Spent          float64              `json:"spent"`
 	Remaining      *float64             `json:"remaining"`
 	ResetsAt       *string              `json:"resets_at"`
+	Balance        *balanceView         `json:"balance"`
 	Metadata       map[string]any       `json:"metadata"`
 	SecretNames    []string             `json:"secret_names"`
 	Usage          map[string]rateUsage `json:"usage"`
+}
+
+type balanceView struct {
+	Used      float64 `json:"used"`
+	Limit     float64 `json:"limit"`
+	Unit      string  `json:"unit"`
+	ResetsAt  *string `json:"resets_at"`
+	CheckedAt string  `json:"checked_at"`
+}
+
+func balanceViewOf(b *keypool.Balance) *balanceView {
+	if b == nil {
+		return nil
+	}
+	return &balanceView{Used: b.Used, Limit: b.Limit, Unit: b.Unit, ResetsAt: rfc3339OrNil(b.ResetsAt), CheckedAt: rfc3339(b.CheckedAt)}
 }
 
 type budgetView struct {

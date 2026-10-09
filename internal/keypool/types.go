@@ -28,6 +28,7 @@ type PoolKey struct {
 	Budget             *db.Budget
 	Spent              float64
 	SpentPeriodStart   *time.Time
+	Balance            *Balance
 	Metadata           map[string]any
 	Secrets            map[string]string
 	Features           map[string]FeatureLimit

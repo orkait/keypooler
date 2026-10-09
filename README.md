@@ -32,6 +32,7 @@ caller  ──►  GET /key?feature=firecrawl_scrape  ──►  keypooler picks
 | ⏱️ **Rate limits** | Per-feature, windowed (e.g. 10 calls / 60s). Defined on the tier, applied per key. |
 | 📅 **Usage budgets** | Per-key `usage_limit` with an optional `usage_window_seconds` (e.g. 2592000 = monthly auto-reset). `nil` window = lifetime cap. |
 | 💰 **Spend budgets** | Per-key `budget` in `usd` or `credits`, refilled each month on its `reset_day` (1-28) or lifetime without one. Whoever used a key reports what it cost (`POST /key/{id}/spend`, idempotent on `request_id`); a key at its budget is not served until the next reset. |
+| 🔎 **Provider balances** | Every 15 minutes keypooler asks Firecrawl (`/v1/team/credit-usage`), Tavily (`/usage`) and Apify (`/v2/users/me/limits`) what each of their keys has used of its limit. The balance shows on `GET /admin/keys`; a key at its limit is skipped until the provider's own cycle end (Tavily gives none, so it is checked again next round). |
 | 👤 **Scoped consumers** | Each client gets a bearer token scoped to specific tiers. The admin token is a superuser. |
 | 🔗 **Bound secrets** | Extra named secrets travel with a key (e.g. a Firecrawl `webhook_secret`), returned at serve time. |
 | 🔐 **Opt-in encryption** | Plaintext at rest by default; set `ENCRYPTION_KEY` to encrypt new writes. Self-tagged, so both coexist. |
@@ -191,6 +192,7 @@ Everything else is a constant in `internal/config`: listen on `:8080`, 4 databas
 cmd/keypooler/main.go    wires DB, sealer, key pool, HTTP server
 internal/
   api/                   handlers, router, middleware, consumer auth
+  balance/               provider balance checks (Firecrawl, Tavily, Apify) and the 15-minute sync
   config/                env config + validation
   crypto/                AES-256-GCM + Sealer (opt-in, self-tagged)
   db/                    Postgres adapter (pgx pool), migrations
