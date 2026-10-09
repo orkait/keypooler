@@ -2,11 +2,13 @@ package keypool
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
 	"github.com/orkait/keypooler/internal/writeback"
 
@@ -254,14 +256,18 @@ func TestAnElapsedUsageWindowRollsOverAndThatIsPersisted(t *testing.T) {
 func TestASyncSeesEveryActiveKeyOfAFeatureAndItsBalanceIsListed(t *testing.T) {
 	later := time.Now().Add(time.Hour)
 	features := map[string]FeatureLimit{"scrape": {RateLimit: 10, WindowSeconds: 60}}
+	sealer, _ := crypto.NewSealer(strings.Repeat("ab", 32))
+	sealed, _ := sealer.Seal("v2")
 	m, _ := pooled(
 		&PoolKey{ID: "serving", KeyValue: "v1", IsActive: true, Features: features},
-		&PoolKey{ID: "benched", KeyValue: "v2", IsActive: true, ExhaustedUntil: &later, Features: features},
+		&PoolKey{ID: "benched", KeyValue: sealed, IsActive: true, ExhaustedUntil: &later, Features: features},
+		&PoolKey{ID: "unreadable", KeyValue: crypto.GCMPrefix + "00", IsActive: true, Features: features},
 		&PoolKey{ID: "off", KeyValue: "v3", Features: features},
 		&PoolKey{ID: "other", KeyValue: "v4", IsActive: true, Features: map[string]FeatureLimit{"search": {RateLimit: 10, WindowSeconds: 60}}},
 	)
+	m.sealer = sealer
 	held := m.Holding("scrape")
-	if len(held) != 2 || held[0] != (Held{ID: "serving", KeyValue: "v1"}) || held[1].ID != "benched" {
+	if len(held) != 2 || held[0] != (Held{ID: "serving", KeyValue: "v1"}) || held[1] != (Held{ID: "benched", KeyValue: "v2"}) {
 		t.Fatalf("held %+v", held)
 	}
 	m.SetBalance("serving", Balance{Used: 4, Limit: 1000, Unit: UnitCredits})

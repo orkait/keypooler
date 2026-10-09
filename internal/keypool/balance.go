@@ -23,9 +23,15 @@ func (m *Manager) Holding(feature string) []Held {
 	defer m.mu.RUnlock()
 	var held []Held
 	for _, key := range m.keys {
-		if key.IsActive && key.HasFeature(feature) {
-			held = append(held, Held{ID: key.ID, KeyValue: key.KeyValue})
+		if !key.IsActive || !key.HasFeature(feature) {
+			continue
 		}
+		value, err := m.sealer.Open(key.KeyValue)
+		if err != nil {
+			m.logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to open key")
+			continue
+		}
+		held = append(held, Held{ID: key.ID, KeyValue: value})
 	}
 	return held
 }
