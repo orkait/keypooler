@@ -179,6 +179,7 @@ func (s *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
 			Spent:          ks.Spent,
 			Remaining:      keypool.Remaining(ks.Budget, ks.Spent),
 			ResetsAt:       rfc3339OrNil(ks.ResetsAt),
+			Balance:        balanceViewOf(ks.Balance),
 			Metadata:       ks.Metadata,
 			SecretNames:    ks.SecretNames,
 			Usage:          usage,

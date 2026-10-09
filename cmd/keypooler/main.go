@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/orkait/keypooler/internal/api"
+	"github.com/orkait/keypooler/internal/balance"
 	"github.com/orkait/keypooler/internal/config"
 	"github.com/orkait/keypooler/internal/crypto"
 	"github.com/orkait/keypooler/internal/db"
@@ -22,6 +23,8 @@ import (
 
 const (
 	writebackPeriod  = time.Second
+	balancePeriod    = 15 * time.Minute
+	balanceTimeout   = 15 * time.Second
 	authCacheTTL     = time.Minute
 	migrationTimeout = 5 * time.Second
 	migrationsDir    = "./migrations"
@@ -50,6 +53,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to initialize key pool")
 	}
 	logger.Info().Int("pool_size", pool.PoolSize()).Bool("encryption", sealer.Enabled()).Msg("key pool initialized")
+	stopBalances := startBalances(pool, logger)
 
 	handler := api.NewRouter(&api.Server{
 		DB:         store,
@@ -61,6 +65,7 @@ func main() {
 		Logger:     logger,
 	})
 	serveUntilSignalled(handler, logger)
+	stopBalances()
 	stopWriteback()
 	logger.Info().Msg("keypooler stopped")
 }
@@ -88,6 +93,20 @@ func startWriteback(store writeback.Store, logger zerolog.Logger) (*writeback.Wr
 		close(done)
 	}()
 	return usage, func() {
+		cancel()
+		<-done
+	}
+}
+
+func startBalances(pool *keypool.Manager, logger zerolog.Logger) func() {
+	syncer := balance.NewSyncer(pool, balance.Sources(&http.Client{Timeout: balanceTimeout}), balancePeriod, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		syncer.Run(ctx)
+		close(done)
+	}()
+	return func() {
 		cancel()
 		<-done
 	}

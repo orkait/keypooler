@@ -255,6 +255,7 @@ type KeyHealth struct {
 	Budget         *db.Budget
 	Spent          float64
 	ResetsAt       *time.Time
+	Balance        *Balance
 	Metadata       map[string]any
 	SecretNames    []string
 	Usage          map[string]RateInfo
@@ -287,6 +288,7 @@ func (m *Manager) GetHealthStatus() []KeyHealth {
 			Budget:         key.Budget,
 			Spent:          key.spentNow(now),
 			ResetsAt:       resetsAt,
+			Balance:        key.Balance,
 			Metadata:       key.Metadata,
 			SecretNames:    secretNames,
 			Usage:          key.RateUsage(),
