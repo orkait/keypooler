@@ -158,6 +158,7 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 |---|---|---|---|
 | `GET` | `/health` | public | liveness |
 | `GET` | `/key?feature=X` | admin **or** consumer | draw a rotated key for a feature |
+| `GET` | `/key/{id}?feature=X` | admin **or** consumer | serve one named key for a feature, for a caller that must stay on the key an account was set up with; scope, rate limit and usage apply as on a draw; `404` unknown id, `403` out of scope or feature not on its tier, `429` exhausted |
 | `POST` | `/key/{id}/exhausted` | admin **or** consumer | report a key the provider refused; body `{"until": RFC3339}`, the key is skipped until then and serves again on its own |
 | `POST` | `/key/{id}/spend` | admin **or** consumer | report what a call cost; body `{"amount": 0.0123, "unit": "usd", "request_id": "..."}`, answers `spent`, `remaining`, `resets_at`; a repeated `request_id` is not counted twice, a unit other than the budget's is `409` |
 | `GET` `POST` `PATCH` | `/admin/tiers` | admin | list / create / update tier features |

@@ -40,6 +40,38 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, drawnKey{KeyID: key.ID, Value: value, Metadata: key.Metadata, Secrets: key.Secrets})
 }
 
+func (s *Server) GetKeyByID(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.resolveKeyCaller(w, r)
+	if !ok {
+		return
+	}
+	feature := r.URL.Query().Get(featureParam)
+	if feature == "" {
+		writeError(w, http.StatusBadRequest, "feature query param required")
+		return
+	}
+	key, err := s.Pool.KeyByID(r.PathValue("id"), feature, caller.allowedTierIDs)
+	switch {
+	case errors.Is(err, keypool.ErrNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	case errors.Is(err, keypool.ErrOutOfScope):
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	case err != nil:
+		writeError(w, http.StatusTooManyRequests, keypool.ErrExhausted.Error())
+		return
+	}
+	value, err := s.Sealer.Open(key.KeyValue)
+	if err != nil {
+		s.Logger.Error().Err(err).Str("key_id", key.ID).Msg("failed to open key value")
+		writeError(w, http.StatusInternalServerError, "failed to read key")
+		return
+	}
+	s.Usage.Event(db.NewUsageEvent(key.ID, caller.consumerID, feature))
+	writeJSON(w, http.StatusOK, drawnKey{KeyID: key.ID, Value: value, Metadata: key.Metadata, Secrets: key.Secrets})
+}
+
 type addKeyBody struct {
 	Name               string            `json:"name"`
 	Key                string            `json:"key"`

@@ -99,6 +99,58 @@ func (*poolStore) KeySecretsByKey(context.Context) (map[string][]*db.KeySecret, 
 	return nil, nil
 }
 
+type pinnedStore struct{ consumerDB }
+
+func (*pinnedStore) GetAllKeys(context.Context) ([]*db.Key, error) {
+	return []*db.Key{
+		{ID: "z1", KeyValue: "v1", TierID: "zernio", IsActive: true},
+		{ID: "z2", KeyValue: "v2", TierID: "zernio", IsActive: true},
+	}, nil
+}
+
+func (*pinnedStore) TierFeaturesByTier(context.Context) (map[string][]*db.TierFeature, error) {
+	return map[string][]*db.TierFeature{"zernio": {{TierID: "zernio", Feature: "zernio", RateLimit: 10, WindowSeconds: 60}}}, nil
+}
+
+func (*pinnedStore) KeySecretsByKey(context.Context) (map[string][]*db.KeySecret, error) {
+	return nil, nil
+}
+
+func TestAKeyIsServedByItsIdSoACallerCanStayOnTheOneItWasGiven(t *testing.T) {
+	store := &pinnedStore{consumerDB{active: true}}
+	sealer, _ := crypto.NewSealer("")
+	pool, err := keypool.NewManager(store, sealer, writeback.New(nil, zerolog.Nop()), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := authServer(&store.consumerDB)
+	s.DB, s.Pool, s.Sealer, s.Usage = store, pool, sealer, writeback.New(nil, zerolog.Nop())
+	get := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set(headerAuthorization, bearer(adminToken))
+		w := httptest.NewRecorder()
+		NewRouter(s).ServeHTTP(w, r)
+		return w
+	}
+	for i := 0; i < 3; i++ {
+		w := get("/key/z2?feature=zernio")
+		var served drawnKey
+		_ = json.Unmarshal(w.Body.Bytes(), &served)
+		if w.Code != http.StatusOK || served.KeyID != "z2" || served.Value != "v2" {
+			t.Fatalf("draw %d answered %d %s", i, w.Code, w.Body)
+		}
+	}
+	for path, want := range map[string]int{
+		"/key/z2?feature=elsewhere": http.StatusForbidden,
+		"/key/none?feature=zernio":  http.StatusNotFound,
+		"/key/z2":                   http.StatusBadRequest,
+	} {
+		if w := get(path); w.Code != want {
+			t.Errorf("%s answered %d, want %d", path, w.Code, want)
+		}
+	}
+}
+
 func TestAScopedConsumerIsForbiddenOutOfScopeAndThrottledWhenSpent(t *testing.T) {
 	store := &poolStore{consumerDB{active: true}}
 	sealer, _ := crypto.NewSealer("")
