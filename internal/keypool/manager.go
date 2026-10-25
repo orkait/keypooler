@@ -19,6 +19,7 @@ const dbTimeout = 5 * time.Second
 var (
 	ErrOutOfScope = errors.New("no key in scope serves the feature")
 	ErrExhausted  = errors.New("no key available for feature")
+	ErrNotFound   = errors.New("no key by that id")
 )
 
 type Store interface {
@@ -91,6 +92,30 @@ func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]boo
 		return nil, ErrOutOfScope
 	}
 	return nil, ErrExhausted
+}
+
+// KeyByID exists because some providers' keys are not interchangeable: an account set up under one key must keep drawing that key.
+func (m *Manager) KeyByID(id, feature string, allowedTierIDs map[string]bool) (*Served, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	key := m.find(id)
+	if key == nil {
+		return nil, ErrNotFound
+	}
+	if (allowedTierIDs != nil && !allowedTierIDs[key.TierID]) || !key.HasFeature(feature) {
+		return nil, ErrOutOfScope
+	}
+	if !key.Available() || !key.TryRate(feature) {
+		return nil, ErrExhausted
+	}
+	ok, didReset, windowStart := key.TryConsumeUsage()
+	if !ok {
+		return nil, ErrExhausted
+	}
+	if key.UsageLimit != nil {
+		m.persistUsage(key.ID, didReset, windowStart)
+	}
+	return &Served{ID: key.ID, KeyValue: key.KeyValue, Metadata: key.Metadata, Secrets: key.Secrets}, nil
 }
 
 func (m *Manager) persistUsage(keyID string, didReset bool, windowStart time.Time) {

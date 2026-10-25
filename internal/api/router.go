@@ -7,6 +7,7 @@ func NewRouter(srv *Server) http.Handler {
 
 	mux.HandleFunc("GET /health", srv.HealthCheck)
 	mux.HandleFunc("GET /key", srv.GetKey)
+	mux.HandleFunc("GET /key/{id}", srv.GetKeyByID)
 	mux.HandleFunc("POST /key/{id}/exhausted", srv.ExhaustKey)
 	mux.HandleFunc("POST /key/{id}/spend", srv.ReportSpend)
 
