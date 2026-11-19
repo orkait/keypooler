@@ -23,6 +23,8 @@ type DBAdapter interface {
 	ResetUsageWindow(ctx context.Context, keyID string, start time.Time, count int) error
 	SetKeyExhausted(ctx context.Context, keyID string, until time.Time) error
 	UpdateKeyBudget(ctx context.Context, keyID string, budget *Budget) error
+	ReplaceKeyValue(ctx context.Context, keyID, value string) error
+	ReplaceKeySecretValue(ctx context.Context, keyID, name, value string) error
 	RecordSpend(ctx context.Context, event *SpendEvent, periodStart *time.Time) (spent float64, duplicate bool, err error)
 	KeySecretsByKey(ctx context.Context) (map[string][]*KeySecret, error)
 

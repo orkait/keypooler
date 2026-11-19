@@ -106,6 +106,28 @@ func TestATakenNameIsADuplicate(t *testing.T) {
 	}
 }
 
+func TestAKeyValueAndItsSecretAreReplacedInPlace(t *testing.T) {
+	a, ctx := freshDB(t), context.Background()
+	seedTier(t, a, "t")
+	secrets := []*KeySecret{{KeyID: "k1", Name: "webhook", Value: "plain-secret"}}
+	if err := a.CreateKey(ctx, &Key{ID: "k1", Name: "one", KeyValue: "plain-key", TierID: "t", IsActive: true}, secrets); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ReplaceKeyValue(ctx, "k1", "enc:gcm:key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ReplaceKeySecretValue(ctx, "k1", "webhook", "enc:gcm:secret"); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := a.GetAllKeys(ctx)
+	if err != nil || len(keys) != 1 || keys[0].KeyValue != "enc:gcm:key" {
+		t.Fatalf("keys %+v err %v", keys, err)
+	}
+	if bound, err := a.KeySecretsByKey(ctx); err != nil || bound["k1"][0].Value != "enc:gcm:secret" {
+		t.Fatalf("secrets %+v err %v", bound, err)
+	}
+}
+
 func TestKeysKeepNullableFieldsMetadataAndCounters(t *testing.T) {
 	a, ctx := freshDB(t), context.Background()
 	seedTier(t, a, "t")

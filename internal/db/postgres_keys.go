@@ -210,6 +210,16 @@ func (a *PostgresAdapter) SetKeyExhausted(ctx context.Context, keyID string, unt
 	return err
 }
 
+func (a *PostgresAdapter) ReplaceKeyValue(ctx context.Context, keyID, value string) error {
+	_, err := a.pool.Exec(ctx, "UPDATE keys SET key_value = $1 WHERE id = $2", value, keyID)
+	return err
+}
+
+func (a *PostgresAdapter) ReplaceKeySecretValue(ctx context.Context, keyID, name, value string) error {
+	_, err := a.pool.Exec(ctx, "UPDATE key_secrets SET value = $1 WHERE key_id = $2 AND name = $3", value, keyID, name)
+	return err
+}
+
 func (a *PostgresAdapter) KeySecretsByKey(ctx context.Context) (map[string][]*KeySecret, error) {
 	rows, err := a.pool.Query(ctx, "SELECT key_id, name, value FROM key_secrets ORDER BY key_id, name")
 	if err != nil {
