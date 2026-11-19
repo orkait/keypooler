@@ -46,6 +46,11 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("invalid encryption configuration")
 	}
+	sealedNow, err := keypool.SealAtRest(context.Background(), store, sealer)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to seal plaintext keys")
+	}
+	logger.Info().Int("sealed", sealedNow).Msg("plaintext keys and secrets sealed at rest")
 	usage, stopWriteback := startWriteback(store, logger)
 
 	pool, err := keypool.NewManager(store, sealer, usage, logger)

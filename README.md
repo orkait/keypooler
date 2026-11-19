@@ -35,7 +35,7 @@ caller  ──►  GET /key?feature=firecrawl_scrape  ──►  keypooler picks
 | 🔎 **Provider balances** | Every 15 minutes keypooler asks Firecrawl (`/v1/team/credit-usage`), Tavily (`/usage`) and Apify (`/v2/users/me/limits`) what each of their keys has used of its limit. The balance shows on `GET /admin/keys`; a key at its limit is skipped until the provider's own cycle end (Tavily gives none, so it is checked again next round). |
 | 👤 **Scoped consumers** | Each client gets a bearer token scoped to specific tiers. The admin token manages keys, tiers and consumers but never reads a key value. |
 | 🔗 **Bound secrets** | Extra named secrets travel with a key (e.g. a Firecrawl `webhook_secret`), returned at serve time. |
-| 🔐 **Opt-in encryption** | Plaintext at rest by default; set `ENCRYPTION_KEY` to encrypt new writes. Self-tagged, so both coexist. |
+| 🔐 **Opt-in encryption** | Plaintext at rest by default; set `ENCRYPTION_KEY` and every key and bound secret is encrypted, the old plaintext ones at the next boot. Self-tagged, so a value is never sealed twice. |
 | 📜 **Audit** | Every serve appends a `usage_events` row (key, consumer, feature, time). |
 | ⏳ **Expiry** | Optional `expires_at` per key; expired keys leave the pool automatically. |
 
@@ -182,7 +182,7 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 | Var | Default | Notes |
 |---|---|---|
 | `ADMIN_TOKEN` | *(required)* | bearer token for `/admin/*`; cannot draw keys |
-| `ENCRYPTION_KEY` | *(empty = plaintext)* | 32-byte hex; when set, new writes are encrypted |
+| `ENCRYPTION_KEY` | *(empty = plaintext)* | 32-byte hex; when set, new writes are encrypted and plaintext keys and secrets are sealed at boot |
 | `DATABASE_URL` | *(required)* | `postgres://user:pass@host:5432/db` |
 
 Everything else is a constant in `internal/config`: listen on `:8080`, 4 database connections (the serve path uses none), HTTP timeouts 30/30/120 s and a 30 s shutdown, JSON logs at info.

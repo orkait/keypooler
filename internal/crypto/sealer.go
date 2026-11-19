@@ -42,6 +42,8 @@ func NewSealer(keyHex string) (*Sealer, error) {
 
 func (s *Sealer) Enabled() bool { return s.aead != nil }
 
+func IsSealed(stored string) bool { return strings.HasPrefix(stored, GCMPrefix) }
+
 func (s *Sealer) Seal(plaintext string) (string, error) {
 	if s.aead == nil {
 		return plaintext, nil
