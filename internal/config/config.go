@@ -18,6 +18,8 @@ const (
 	IdleTimeout     = 120 * time.Second
 	ShutdownTimeout = 30 * time.Second
 	MaxDBConns      = 4
+	EventRetention  = 90 * 24 * time.Hour
+	PrunePeriod     = 24 * time.Hour
 )
 
 var postgresSchemes = []string{"postgres://", "postgresql://"}

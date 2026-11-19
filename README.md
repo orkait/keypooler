@@ -36,7 +36,7 @@ caller  ──►  GET /key?feature=firecrawl_scrape  ──►  keypooler picks
 | 👤 **Scoped consumers** | Each client gets a bearer token scoped to specific tiers. The admin token manages keys, tiers and consumers but never reads a key value. |
 | 🔗 **Bound secrets** | Extra named secrets travel with a key (e.g. a Firecrawl `webhook_secret`), returned at serve time. |
 | 🔐 **Opt-in encryption** | Plaintext at rest by default; set `ENCRYPTION_KEY` and every key and bound secret is encrypted, the old plaintext ones at the next boot. Self-tagged, so a value is never sealed twice. |
-| 📜 **Audit** | Every serve appends a `usage_events` row (key, consumer, feature, time). |
+| 📜 **Audit** | Every serve appends a `usage_events` row (key, consumer, feature, time). Usage and spend events are kept 90 days, pruned at boot and daily. |
 | ⏳ **Expiry** | Optional `expires_at` per key; expired keys leave the pool automatically. |
 
 ## 🏗️ Architecture
@@ -74,8 +74,8 @@ flowchart LR
 | `key_secrets` | named secrets bound to a key (e.g. `webhook_secret`) |
 | `consumers` | scoped clients, bearer token stored sha256-hashed (shown once) |
 | `consumer_scopes` | which tiers a consumer may draw from |
-| `usage_events` | append-only audit, one row per serve |
-| `spend_events` | one row per spend report, unique on `request_id`; `keys` carries `budget_*`, `spent` and `spent_period_start` |
+| `usage_events` | append-only audit, one row per serve, kept 90 days (`config.EventRetention`) |
+| `spend_events` | one row per spend report, unique on `request_id`, kept 90 days; `keys` carries `budget_*`, `spent` and `spent_period_start`, so pruning changes no budget, and a report retried within 90 days still counts once |
 
 Migrations are `migrations/001_init.sql` and `002_budgets.sql`, each idempotent (`IF NOT EXISTS`). Deletes also clean up children explicitly, in one transaction, so a reused id can never re-grant an old scope.
 </details>

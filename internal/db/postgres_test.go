@@ -6,6 +6,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func freshDB(t *testing.T) *PostgresAdapter {
@@ -251,5 +253,41 @@ func TestUsageEventsLandInOneBatchKeepingWhenTheyHappened(t *testing.T) {
 	}
 	if all, _ := a.ListUsageEvents(ctx, 10); len(all) != 3 || all[1].ConsumerID != "" {
 		t.Fatalf("all %+v", all)
+	}
+}
+
+func TestPruningDropsOnlyEventsOlderThanTheCutoffAndKeepsRecentSpendIdempotent(t *testing.T) {
+	a, ctx := freshDB(t), context.Background()
+	cutoff := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+	stamps := map[string]time.Time{"old": cutoff.Add(-time.Hour), "recent": cutoff.Add(time.Hour)}
+	recordSpend := func(age string) bool {
+		_, duplicate, err := a.RecordSpend(ctx, &SpendEvent{
+			ID: age + "-" + uuid.New().String(), KeyID: "k", Amount: 1, Unit: "usd", RequestID: age, CreatedAt: stamps[age],
+		}, nil)
+		if err != nil {
+			t.Fatalf("spend %s: %v", age, err)
+		}
+		return duplicate
+	}
+	for age, at := range stamps {
+		e := NewUsageEvent("k", "c1", age)
+		e.CreatedAt = at
+		if err := a.RecordUsageEvents(ctx, []*UsageEvent{e}); err != nil {
+			t.Fatal(err)
+		}
+		recordSpend(age)
+	}
+	removed, err := a.PruneEvents(ctx, cutoff)
+	if err != nil || removed != 2 {
+		t.Fatalf("removed %d err %v, want the old usage and spend events", removed, err)
+	}
+	if left, _ := a.ListUsageEvents(ctx, 10); len(left) != 1 || left[0].Feature != "recent" {
+		t.Fatalf("usage left %+v", left)
+	}
+	if !recordSpend("recent") {
+		t.Fatal("a recent request counted twice after pruning")
+	}
+	if recordSpend("old") {
+		t.Fatal("an old request's spend event survived pruning")
 	}
 }
