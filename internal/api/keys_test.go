@@ -47,7 +47,7 @@ func (k *keyStore) KeySecretsByKey(context.Context) (map[string][]*db.KeySecret,
 func addKey(t *testing.T, body string) (*keyStore, *httptest.ResponseRecorder) {
 	t.Helper()
 	store := &keyStore{}
-	sealer, _ := crypto.NewSealer("")
+	sealer, _ := crypto.NewSealer("", "")
 	pool, err := keypool.NewManager(store, sealer, writeback.New(nil, zerolog.Nop()), zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ func (*pinnedStore) GetConsumerScopes(context.Context, string) ([]string, error)
 func pinnedServer(t *testing.T) *Server {
 	t.Helper()
 	store := &pinnedStore{consumerDB{active: true}}
-	sealer, _ := crypto.NewSealer("")
+	sealer, _ := crypto.NewSealer("", "")
 	pool, err := keypool.NewManager(store, sealer, writeback.New(nil, zerolog.Nop()), zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +178,7 @@ func TestAKeyIsServedByItsIdSoACallerCanStayOnTheOneItWasGiven(t *testing.T) {
 
 func TestAScopedConsumerIsForbiddenOutOfScopeAndThrottledWhenSpent(t *testing.T) {
 	store := &poolStore{consumerDB{active: true}}
-	sealer, _ := crypto.NewSealer("")
+	sealer, _ := crypto.NewSealer("", "")
 	pool, err := keypool.NewManager(store, sealer, writeback.New(nil, zerolog.Nop()), zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)

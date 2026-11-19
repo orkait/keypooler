@@ -11,6 +11,8 @@ const (
 	envAdminToken    = "ADMIN_TOKEN"
 	envDatabaseURL   = "DATABASE_URL"
 	envEncryptionKey = "ENCRYPTION_KEY"
+	// Set only while rotating: the key being replaced, so its values open until re-sealed at boot.
+	envPreviousEncryptionKey = "ENCRYPTION_KEY_PREVIOUS"
 
 	Addr            = ":8080"
 	ReadTimeout     = 30 * time.Second
@@ -30,16 +32,18 @@ var (
 )
 
 type Config struct {
-	DatabaseURL   string
-	EncryptionKey string
-	AdminToken    string
+	DatabaseURL           string
+	EncryptionKey         string
+	PreviousEncryptionKey string
+	AdminToken            string
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL:   os.Getenv(envDatabaseURL),
-		EncryptionKey: os.Getenv(envEncryptionKey),
-		AdminToken:    os.Getenv(envAdminToken),
+		DatabaseURL:           os.Getenv(envDatabaseURL),
+		EncryptionKey:         os.Getenv(envEncryptionKey),
+		PreviousEncryptionKey: os.Getenv(envPreviousEncryptionKey),
+		AdminToken:            os.Getenv(envAdminToken),
 	}
 	if cfg.AdminToken == "" {
 		return nil, ErrNoAdminToken

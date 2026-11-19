@@ -98,7 +98,7 @@ func TestATierIsDeletedOnlyWhenNoKeyUsesIt(t *testing.T) {
 func budgetServer(t *testing.T) (*budgetStore, http.Handler) {
 	t.Helper()
 	store := &budgetStore{consumerDB: consumerDB{active: true}}
-	sealer, _ := crypto.NewSealer("")
+	sealer, _ := crypto.NewSealer("", "")
 	pool, err := keypool.NewManager(store, sealer, writeback.New(nil, zerolog.Nop()), zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
