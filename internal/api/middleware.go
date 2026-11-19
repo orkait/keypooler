@@ -70,6 +70,15 @@ func (s *Server) resolveKeyCaller(w http.ResponseWriter, r *http.Request) (keyCa
 	return caller, true
 }
 
+func (s *Server) resolveDrawCaller(w http.ResponseWriter, r *http.Request) (keyCaller, bool) {
+	caller, ok := s.resolveKeyCaller(w, r)
+	if ok && caller.consumerID == adminConsumerID {
+		writeError(w, http.StatusForbidden, errAdminCannotDraw)
+		return keyCaller{}, false
+	}
+	return caller, ok
+}
+
 func (s *Server) consumerCaller(ctx context.Context, tokenHash string) (keyCaller, bool, error) {
 	if caller, ok := s.Auth.get(tokenHash); ok {
 		return caller, true, nil

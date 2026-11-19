@@ -33,7 +33,7 @@ caller  ──►  GET /key?feature=firecrawl_scrape  ──►  keypooler picks
 | 📅 **Usage budgets** | Per-key `usage_limit` with an optional `usage_window_seconds` (e.g. 2592000 = monthly auto-reset). `nil` window = lifetime cap. |
 | 💰 **Spend budgets** | Per-key `budget` in `usd` or `credits`, refilled each month on its `reset_day` (1-28) or lifetime without one. Whoever used a key reports what it cost (`POST /key/{id}/spend`, idempotent on `request_id`); a key at its budget is not served until the next reset. |
 | 🔎 **Provider balances** | Every 15 minutes keypooler asks Firecrawl (`/v1/team/credit-usage`), Tavily (`/usage`) and Apify (`/v2/users/me/limits`) what each of their keys has used of its limit. The balance shows on `GET /admin/keys`; a key at its limit is skipped until the provider's own cycle end (Tavily gives none, so it is checked again next round). |
-| 👤 **Scoped consumers** | Each client gets a bearer token scoped to specific tiers. The admin token is a superuser. |
+| 👤 **Scoped consumers** | Each client gets a bearer token scoped to specific tiers. The admin token manages keys, tiers and consumers but never reads a key value. |
 | 🔗 **Bound secrets** | Extra named secrets travel with a key (e.g. a Firecrawl `webhook_secret`), returned at serve time. |
 | 🔐 **Opt-in encryption** | Plaintext at rest by default; set `ENCRYPTION_KEY` to encrypt new writes. Self-tagged, so both coexist. |
 | 📜 **Audit** | Every serve appends a `usage_events` row (key, consumer, feature, time). |
@@ -41,14 +41,14 @@ caller  ──►  GET /key?feature=firecrawl_scrape  ──►  keypooler picks
 
 ## 🏗️ Architecture
 
-Keys live in **tiers**. A tier names the features it covers and the rate limit for each. **Consumers** are scoped clients that may only draw from the tiers they are granted. The admin token bypasses scoping.
+Keys live in **tiers**. A tier names the features it covers and the rate limit for each. **Consumers** are scoped clients that may only draw from the tiers they are granted. The admin token cannot draw: a leaked admin token can rearrange the pool but cannot read a key.
 
 ```mermaid
 flowchart LR
     C[caller] -->|Bearer token| K{/key?feature=X}
-    K -->|admin token| ALL[all tiers]
+    K -->|admin token| X[403: admin cannot draw]
     K -->|consumer token| SC[scoped tiers only]
-    ALL & SC --> F[filter pool:<br/>active, unexpired, under usage limit,<br/>supports feature, has rate budget]
+    SC --> F[filter pool:<br/>active, unexpired, under usage limit,<br/>supports feature, has rate budget]
     F --> RR[round-robin pick]
     RR --> G[TryRate + TryConsumeUsage]
     G -->|ok| R[return value + secrets + metadata]
@@ -60,7 +60,7 @@ flowchart LR
 
 | Caller | `/key` access | `/admin/*` |
 |---|---|---|
-| Admin token | every tier (superuser) | full |
+| Admin token | `403` on `GET /key` and `GET /key/{id}`; may bench a key (`exhausted`) and report spend | full |
 | Consumer token | only granted tiers (`401` unknown, `403` out-of-scope) | denied |
 
 <details>
@@ -157,8 +157,8 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/health` | public | liveness |
-| `GET` | `/key?feature=X` | admin **or** consumer | draw a rotated key for a feature |
-| `GET` | `/key/{id}?feature=X` | admin **or** consumer | serve one named key for a feature, for a caller that must stay on the key an account was set up with; scope, rate limit and usage apply as on a draw; `404` unknown id, `403` out of scope or feature not on its tier, `429` exhausted |
+| `GET` | `/key?feature=X` | consumer | draw a rotated key for a feature; the admin token gets `403` |
+| `GET` | `/key/{id}?feature=X` | consumer | serve one named key for a feature, for a caller that must stay on the key an account was set up with; scope, rate limit and usage apply as on a draw; `404` unknown id, `403` out of scope or feature not on its tier, `429` exhausted |
 | `POST` | `/key/{id}/exhausted` | admin **or** consumer | report a key the provider refused; body `{"until": RFC3339}`, the key is skipped until then and serves again on its own |
 | `POST` | `/key/{id}/spend` | admin **or** consumer | report what a call cost; body `{"amount": 0.0123, "unit": "usd", "request_id": "..."}`, answers `spent`, `remaining`, `resets_at`; a repeated `request_id` is not counted twice, a unit other than the budget's is `409` |
 | `GET` `POST` `PATCH` | `/admin/tiers` | admin | list / create / update tier features |
@@ -180,7 +180,7 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 
 | Var | Default | Notes |
 |---|---|---|
-| `ADMIN_TOKEN` | *(required)* | superuser bearer token |
+| `ADMIN_TOKEN` | *(required)* | bearer token for `/admin/*`; cannot draw keys |
 | `ENCRYPTION_KEY` | *(empty = plaintext)* | 32-byte hex; when set, new writes are encrypted |
 | `DATABASE_URL` | *(required)* | `postgres://user:pass@host:5432/db` |
 

@@ -116,7 +116,12 @@ func (*pinnedStore) KeySecretsByKey(context.Context) (map[string][]*db.KeySecret
 	return nil, nil
 }
 
-func TestAKeyIsServedByItsIdSoACallerCanStayOnTheOneItWasGiven(t *testing.T) {
+func (*pinnedStore) GetConsumerScopes(context.Context, string) ([]string, error) {
+	return []string{"zernio"}, nil
+}
+
+func pinnedServer(t *testing.T) *Server {
+	t.Helper()
 	store := &pinnedStore{consumerDB{active: true}}
 	sealer, _ := crypto.NewSealer("")
 	pool, err := keypool.NewManager(store, sealer, writeback.New(nil, zerolog.Nop()), zerolog.Nop())
@@ -125,13 +130,33 @@ func TestAKeyIsServedByItsIdSoACallerCanStayOnTheOneItWasGiven(t *testing.T) {
 	}
 	s := authServer(&store.consumerDB)
 	s.DB, s.Pool, s.Sealer, s.Usage = store, pool, sealer, writeback.New(nil, zerolog.Nop())
-	get := func(path string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(http.MethodGet, path, nil)
-		r.Header.Set(headerAuthorization, bearer(adminToken))
-		w := httptest.NewRecorder()
-		NewRouter(s).ServeHTTP(w, r)
-		return w
+	return s
+}
+
+func serve(s *Server, method, path, token string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, nil)
+	r.Header.Set(headerAuthorization, bearer(token))
+	w := httptest.NewRecorder()
+	NewRouter(s).ServeHTTP(w, r)
+	return w
+}
+
+func TestTheAdminTokenNeverReadsAKeyValue(t *testing.T) {
+	s := pinnedServer(t)
+	for _, path := range []string{"/key?feature=zernio", "/key/z2?feature=zernio"} {
+		w := serve(s, http.MethodGet, path, adminToken)
+		if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "v2") {
+			t.Errorf("%s with the admin token answered %d %s", path, w.Code, w.Body)
+		}
+		if w := serve(s, http.MethodGet, path, consumerToken); w.Code != http.StatusOK {
+			t.Errorf("%s with a scoped consumer answered %d", path, w.Code)
+		}
 	}
+}
+
+func TestAKeyIsServedByItsIdSoACallerCanStayOnTheOneItWasGiven(t *testing.T) {
+	s := pinnedServer(t)
+	get := func(path string) *httptest.ResponseRecorder { return serve(s, http.MethodGet, path, consumerToken) }
 	for i := 0; i < 3; i++ {
 		w := get("/key/z2?feature=zernio")
 		var served drawnKey
