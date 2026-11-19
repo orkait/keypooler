@@ -42,15 +42,15 @@ func main() {
 	store := openStore(cfg, logger)
 	defer store.Close()
 
-	sealer, err := crypto.NewSealer(cfg.EncryptionKey)
+	sealer, err := crypto.NewSealer(cfg.EncryptionKey, cfg.PreviousEncryptionKey)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("invalid encryption configuration")
 	}
 	sealedNow, err := keypool.SealAtRest(context.Background(), store, sealer)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to seal plaintext keys")
+		logger.Fatal().Err(err).Msg("failed to seal keys and secrets under the current key")
 	}
-	logger.Info().Int("sealed", sealedNow).Msg("plaintext keys and secrets sealed at rest")
+	logger.Info().Int("sealed", sealedNow).Bool("rotating", cfg.PreviousEncryptionKey != "").Msg("keys and secrets sealed under the current key")
 	usage, stopWriteback := startWriteback(store, logger)
 
 	pool, err := keypool.NewManager(store, sealer, usage, logger)

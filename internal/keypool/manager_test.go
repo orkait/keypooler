@@ -256,7 +256,7 @@ func TestAnElapsedUsageWindowRollsOverAndThatIsPersisted(t *testing.T) {
 func TestASyncSeesEveryActiveKeyOfAFeatureAndItsBalanceIsListed(t *testing.T) {
 	later := time.Now().Add(time.Hour)
 	features := map[string]FeatureLimit{"scrape": {RateLimit: 10, WindowSeconds: 60}}
-	sealer, _ := crypto.NewSealer(strings.Repeat("ab", 32))
+	sealer, _ := crypto.NewSealer(strings.Repeat("ab", 32), "")
 	sealed, _ := sealer.Seal("v2")
 	m, _ := pooled(
 		&PoolKey{ID: "serving", KeyValue: "v1", IsActive: true, Features: features},

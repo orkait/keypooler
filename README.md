@@ -105,6 +105,15 @@ read: decrypt iff the value starts with "enc:gcm:"  ·  a tagged value with no k
 
 The decision lives in one place (`crypto.Sealer`). Callers always receive the plaintext value from the API response and never need the key.
 
+Rotating the key needs no outage and loses nothing: a value no configured key opens stops the boot instead of being dropped.
+
+| Step | Do | Expect |
+|---|---|---|
+| 1 | dump the database (`pg_dump`), keep the old key | a restore point |
+| 2 | `ENCRYPTION_KEY_PREVIOUS` = the old key, `ENCRYPTION_KEY` = a new one (`openssl rand -hex 32`), redeploy | boot log `keys and secrets sealed under the current key` with `sealed` = every key and bound secret, `rotating` = true; draws keep working |
+| 3 | unset `ENCRYPTION_KEY_PREVIOUS`, redeploy | `sealed` = 0, `rotating` = false: nothing is left under the old key |
+| 4 | retire every copy of the old key | |
+
 ## 🚀 Quick start
 
 ```bash
@@ -183,6 +192,7 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 |---|---|---|
 | `ADMIN_TOKEN` | *(required)* | bearer token for `/admin/*`; cannot draw keys |
 | `ENCRYPTION_KEY` | *(empty = plaintext)* | 32-byte hex; when set, new writes are encrypted and plaintext keys and secrets are sealed at boot |
+| `ENCRYPTION_KEY_PREVIOUS` | *(empty)* | only while rotating: the key being replaced; its values still open and are re-sealed under `ENCRYPTION_KEY` at boot |
 | `DATABASE_URL` | *(required)* | `postgres://user:pass@host:5432/db` |
 
 Everything else is a constant in `internal/config`: listen on `:8080`, 4 database connections (the serve path uses none), HTTP timeouts 30/30/120 s and a 30 s shutdown, JSON logs at info.

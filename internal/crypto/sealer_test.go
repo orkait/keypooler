@@ -9,7 +9,7 @@ const testKeyHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d
 
 func TestAValueRoundTripsTaggedOnlyWhenEncrypted(t *testing.T) {
 	for keyHex, encrypted := range map[string]bool{"": false, testKeyHex: true} {
-		s, err := NewSealer(keyHex)
+		s, err := NewSealer(keyHex, "")
 		if err != nil || s.Enabled() != encrypted {
 			t.Fatalf("NewSealer(%q): enabled %v err %v", keyHex, s.Enabled(), err)
 		}
@@ -27,18 +27,45 @@ func TestAValueRoundTripsTaggedOnlyWhenEncrypted(t *testing.T) {
 }
 
 func TestAValueSealedByEarlierCodeStillOpens(t *testing.T) {
-	s, _ := NewSealer(testKeyHex)
+	s, _ := NewSealer(testKeyHex, "")
 	sealed := GCMPrefix + "e114eeeafe68ad08568d25f37a6e35b63d05ad79080690ba4c453542e9a84b7f578400eb50"
 	if got, err := s.Open(sealed); err != nil || got != "fc-secret" {
 		t.Fatalf("got %q err %v", got, err)
 	}
 }
 
+func TestAValueSealedUnderThePreviousKeyOpensUntilItIsReSealed(t *testing.T) {
+	newKeyHex := strings.Repeat("ab", 32)
+	old, _ := NewSealer(testKeyHex, "")
+	fromOld, _ := old.Seal("fc-secret")
+	rotating, err := NewSealer(newKeyHex, testKeyHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := rotating.Open(fromOld); err != nil || got != "fc-secret" {
+		t.Fatalf("a value under the previous key opened to %q err %v", got, err)
+	}
+	fromNew, _ := rotating.Seal("fc-secret")
+	if rotating.Current(fromOld) || !rotating.Current(fromNew) || rotating.Current("fc-plain") {
+		t.Fatal("only a value sealed under the current key is current")
+	}
+	newOnly, _ := NewSealer(newKeyHex, "")
+	if _, err := newOnly.Open(fromOld); err == nil {
+		t.Fatal("dropping the previous key must leave its values unopened")
+	}
+	if got, err := newOnly.Open(fromNew); err != nil || got != "fc-secret" {
+		t.Fatalf("got %q err %v", got, err)
+	}
+	if _, err := NewSealer("", testKeyHex); err == nil {
+		t.Fatal("a previous key without a current one was accepted")
+	}
+}
+
 func TestSealerRefusesWhatItCannotTrust(t *testing.T) {
-	keyed, _ := NewSealer(testKeyHex)
+	keyed, _ := NewSealer(testKeyHex, "")
 	sealed, _ := keyed.Seal("fc-secret")
-	plain, _ := NewSealer("")
-	otherKey, _ := NewSealer(strings.Repeat("ff", 32))
+	plain, _ := NewSealer("", "")
+	otherKey, _ := NewSealer(strings.Repeat("ff", 32), "")
 	cases := map[string]struct {
 		sealer *Sealer
 		stored string
@@ -54,8 +81,11 @@ func TestSealerRefusesWhatItCannotTrust(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"xyz", "00112233"} {
-		if _, err := NewSealer(bad); err == nil {
+		if _, err := NewSealer(bad, ""); err == nil {
 			t.Errorf("key %q accepted", bad)
+		}
+		if _, err := NewSealer(testKeyHex, bad); err == nil {
+			t.Errorf("previous key %q accepted", bad)
 		}
 	}
 }

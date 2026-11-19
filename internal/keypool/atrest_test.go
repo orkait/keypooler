@@ -2,6 +2,7 @@ package keypool
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/orkait/keypooler/internal/crypto"
@@ -47,7 +48,7 @@ func (s *atRestStore) ReplaceKeySecretValue(_ context.Context, keyID, name, valu
 }
 
 func TestEveryPlainValueIsSealedOnceAndStillOpensToTheSameSecret(t *testing.T) {
-	sealer, _ := crypto.NewSealer(atRestKeyHex)
+	sealer, _ := crypto.NewSealer(atRestKeyHex, "")
 	already, _ := sealer.Seal("already-sealed")
 	store := &atRestStore{
 		keys:    map[string]string{"plain": "fc-1", "sealed": already},
@@ -73,8 +74,48 @@ func TestEveryPlainValueIsSealedOnceAndStillOpensToTheSameSecret(t *testing.T) {
 	}
 }
 
+func TestARotationReSealsEveryValueUnderTheNewKeyOnce(t *testing.T) {
+	newKeyHex := strings.Repeat("ab", 32)
+	old, _ := crypto.NewSealer(atRestKeyHex, "")
+	rotating, _ := crypto.NewSealer(newKeyHex, atRestKeyHex)
+	fromOld, _ := old.Seal("fc-old")
+	secretFromOld, _ := old.Seal("wh-old")
+	fromNew, _ := rotating.Seal("fc-new")
+	store := &atRestStore{
+		keys:    map[string]string{"old": fromOld, "new": fromNew, "plain": "fc-plain"},
+		secrets: map[string]map[string]string{"old": {"webhook": secretFromOld}},
+	}
+	for run, want := range []int{3, 0} {
+		sealed, err := SealAtRest(context.Background(), store, rotating)
+		if err != nil || sealed != want {
+			t.Fatalf("run %d sealed %d err %v, want %d", run, sealed, err, want)
+		}
+	}
+	newOnly, _ := crypto.NewSealer(newKeyHex, "")
+	for stored, plain := range map[string]string{
+		store.keys["old"]:               "fc-old",
+		store.keys["new"]:               "fc-new",
+		store.keys["plain"]:             "fc-plain",
+		store.secrets["old"]["webhook"]: "wh-old",
+	} {
+		if opened, err := newOnly.Open(stored); err != nil || opened != plain {
+			t.Errorf("under the new key alone opened %q err %v, want %q", opened, err, plain)
+		}
+	}
+}
+
+func TestAValueNeitherKeyOpensStopsTheBoot(t *testing.T) {
+	stranger, _ := crypto.NewSealer(strings.Repeat("cd", 32), "")
+	lost, _ := stranger.Seal("fc-lost")
+	rotating, _ := crypto.NewSealer(strings.Repeat("ab", 32), atRestKeyHex)
+	store := &atRestStore{keys: map[string]string{"lost": lost}, secrets: map[string]map[string]string{}}
+	if _, err := SealAtRest(context.Background(), store, rotating); err == nil || store.writes != 0 {
+		t.Fatalf("err %v writes %d: a value no key opens must stop the boot untouched", err, store.writes)
+	}
+}
+
 func TestWithoutAnEncryptionKeyNothingIsRewritten(t *testing.T) {
-	sealer, _ := crypto.NewSealer("")
+	sealer, _ := crypto.NewSealer("", "")
 	store := &atRestStore{keys: map[string]string{"plain": "fc-1"}, secrets: map[string]map[string]string{}}
 	if sealed, err := SealAtRest(context.Background(), store, sealer); err != nil || sealed != 0 || store.writes != 0 {
 		t.Fatalf("sealed %d writes %d err %v", sealed, store.writes, err)
