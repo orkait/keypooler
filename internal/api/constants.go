@@ -27,4 +27,6 @@ const (
 	msgInvalidJSON   = "invalid JSON: "
 	msgDatabaseError = "database error"
 	msgTierNotFound  = "tier not found: "
+
+	errAdminCannotDraw = "the admin token manages keys but cannot read them; draw with a consumer token"
 )

@@ -12,7 +12,7 @@ import (
 )
 
 func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.resolveKeyCaller(w, r)
+	caller, ok := s.resolveDrawCaller(w, r)
 	if !ok {
 		return
 	}
@@ -22,7 +22,7 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key, err := s.Pool.GetKeyForFeature(feature, caller.allowedTierIDs)
-	if errors.Is(err, keypool.ErrOutOfScope) && caller.allowedTierIDs != nil {
+	if errors.Is(err, keypool.ErrOutOfScope) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -41,7 +41,7 @@ func (s *Server) GetKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) GetKeyByID(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.resolveKeyCaller(w, r)
+	caller, ok := s.resolveDrawCaller(w, r)
 	if !ok {
 		return
 	}
