@@ -14,8 +14,6 @@ const GCMPrefix = "enc:gcm:"
 
 const keySize = 32
 
-// Sealer seals under the current key. During a rotation it also holds the previous key, so values
-// sealed under it still open until they are re-sealed (keypool.SealAtRest).
 type Sealer struct {
 	aead     cipher.AEAD
 	previous cipher.AEAD
@@ -75,7 +73,6 @@ func (s *Sealer) Seal(plaintext string) (string, error) {
 	return GCMPrefix + hex.EncodeToString(s.aead.Seal(nonce, nonce, []byte(plaintext), nil)), nil
 }
 
-// Current reports whether stored is sealed under the current key, so needs no re-seal.
 func (s *Sealer) Current(stored string) bool {
 	if s.aead == nil || !IsSealed(stored) {
 		return false

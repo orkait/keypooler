@@ -15,9 +15,6 @@ type AtRestStore interface {
 	ReplaceKeySecretValue(ctx context.Context, keyID, name, value string) error
 }
 
-// SealAtRest leaves every key and bound secret sealed under the current key: plain values are
-// sealed, and values sealed under the previous key during a rotation are re-sealed. A value no
-// configured key opens stops it, so a lost key fails the boot instead of losing the value.
 func SealAtRest(ctx context.Context, store AtRestStore, sealer *crypto.Sealer) (int, error) {
 	if !sealer.Enabled() {
 		return 0, nil

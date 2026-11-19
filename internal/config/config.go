@@ -8,20 +8,25 @@ import (
 )
 
 const (
-	envAdminToken    = "ADMIN_TOKEN"
-	envDatabaseURL   = "DATABASE_URL"
-	envEncryptionKey = "ENCRYPTION_KEY"
-	// Set only while rotating: the key being replaced, so its values open until re-sealed at boot.
+	envAdminToken            = "ADMIN_TOKEN"
+	envDatabaseURL           = "DATABASE_URL"
+	envEncryptionKey         = "ENCRYPTION_KEY"
 	envPreviousEncryptionKey = "ENCRYPTION_KEY_PREVIOUS"
 
-	Addr            = ":8080"
-	ReadTimeout     = 30 * time.Second
-	WriteTimeout    = 30 * time.Second
-	IdleTimeout     = 120 * time.Second
-	ShutdownTimeout = 30 * time.Second
-	MaxDBConns      = 4
-	EventRetention  = 90 * 24 * time.Hour
-	PrunePeriod     = 24 * time.Hour
+	Addr             = ":8080"
+	ReadTimeout      = 30 * time.Second
+	WriteTimeout     = 30 * time.Second
+	IdleTimeout      = 120 * time.Second
+	ShutdownTimeout  = 30 * time.Second
+	MaxDBConns       = 4
+	EventRetention   = 90 * 24 * time.Hour
+	PrunePeriod      = 24 * time.Hour
+	WritebackPeriod  = time.Second
+	BalancePeriod    = 15 * time.Minute
+	BalanceTimeout   = 15 * time.Second
+	AuthCacheTTL     = time.Minute
+	MigrationTimeout = 5 * time.Second
+	MigrationsDir    = "./migrations"
 )
 
 var postgresSchemes = []string{"postgres://", "postgresql://"}

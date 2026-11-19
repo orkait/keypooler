@@ -21,15 +21,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const (
-	writebackPeriod  = time.Second
-	balancePeriod    = 15 * time.Minute
-	balanceTimeout   = 15 * time.Second
-	authCacheTTL     = time.Minute
-	migrationTimeout = 5 * time.Second
-	migrationsDir    = "./migrations"
-)
-
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -65,7 +56,7 @@ func main() {
 		DB:         store,
 		Pool:       pool,
 		Usage:      usage,
-		Auth:       api.NewAuthCache(authCacheTTL),
+		Auth:       api.NewAuthCache(config.AuthCacheTTL),
 		AdminToken: cfg.AdminToken,
 		Sealer:     sealer,
 		Logger:     logger,
@@ -82,35 +73,20 @@ func openStore(cfg *config.Config, logger zerolog.Logger) *db.PostgresAdapter {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize database")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), migrationTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), config.MigrationTimeout)
 	defer cancel()
-	if err := db.RunMigrations(ctx, store.Pool(), migrationsDir); err != nil {
+	if err := db.RunMigrations(ctx, store.Pool(), config.MigrationsDir); err != nil {
 		logger.Fatal().Err(err).Msg("failed to run migrations")
 	}
 	logger.Info().Msg("migrations completed")
 	return store
 }
 
-func startWriteback(store writeback.Store, logger zerolog.Logger) (*writeback.Writer, func()) {
-	usage := writeback.New(store, logger)
+func inBackground(run func(context.Context)) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		usage.Run(ctx, writebackPeriod)
-		close(done)
-	}()
-	return usage, func() {
-		cancel()
-		<-done
-	}
-}
-
-func startBalances(pool *keypool.Manager, logger zerolog.Logger) func() {
-	syncer := balance.NewSyncer(pool, balance.Sources(&http.Client{Timeout: balanceTimeout}), balancePeriod, logger)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		syncer.Run(ctx)
+		run(ctx)
 		close(done)
 	}()
 	return func() {
@@ -119,11 +95,18 @@ func startBalances(pool *keypool.Manager, logger zerolog.Logger) func() {
 	}
 }
 
+func startWriteback(store writeback.Store, logger zerolog.Logger) (*writeback.Writer, func()) {
+	usage := writeback.New(store, logger)
+	return usage, inBackground(func(ctx context.Context) { usage.Run(ctx, config.WritebackPeriod) })
+}
+
+func startBalances(pool *keypool.Manager, logger zerolog.Logger) func() {
+	sources := balance.Sources(&http.Client{Timeout: config.BalanceTimeout})
+	return inBackground(balance.NewSyncer(pool, sources, config.BalancePeriod, logger).Run)
+}
+
 func startRetention(store *db.PostgresAdapter, logger zerolog.Logger) func() {
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	return inBackground(func(ctx context.Context) {
 		ticker := time.NewTicker(config.PrunePeriod)
 		defer ticker.Stop()
 		for {
@@ -139,11 +122,7 @@ func startRetention(store *db.PostgresAdapter, logger zerolog.Logger) func() {
 			case <-ticker.C:
 			}
 		}
-	}()
-	return func() {
-		cancel()
-		<-done
-	}
+	})
 }
 
 func serveUntilSignalled(handler http.Handler, logger zerolog.Logger) {
