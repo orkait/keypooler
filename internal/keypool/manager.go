@@ -94,7 +94,6 @@ func (m *Manager) GetKeyForFeature(feature string, allowedTierIDs map[string]boo
 	return nil, ErrExhausted
 }
 
-// KeyByID exists because some providers' keys are not interchangeable: an account set up under one key must keep drawing that key.
 func (m *Manager) KeyByID(id, feature string, allowedTierIDs map[string]bool) (*Served, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
