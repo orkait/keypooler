@@ -26,6 +26,7 @@ func NewRouter(srv *Server) http.Handler {
 	mux.Handle("POST /admin/consumers", admin(srv.CreateConsumer))
 	mux.Handle("DELETE /admin/consumers/{id}", admin(srv.DeleteConsumer))
 	mux.Handle("POST /admin/consumers/{id}/scopes", admin(srv.AddConsumerScope))
+	mux.Handle("DELETE /admin/consumers/{id}/scopes/{name}", admin(srv.RemoveConsumerScope))
 	mux.Handle("GET /admin/usage", admin(srv.ListUsageEvents))
 	return mux
 }

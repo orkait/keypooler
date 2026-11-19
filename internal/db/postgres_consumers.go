@@ -84,6 +84,14 @@ func (a *PostgresAdapter) AddConsumerScope(ctx context.Context, consumerID, tier
 	return err
 }
 
+func (a *PostgresAdapter) RemoveConsumerScope(ctx context.Context, consumerID, tierID string) (bool, error) {
+	tag, err := a.pool.Exec(ctx,
+		"DELETE FROM consumer_scopes WHERE consumer_id = $1 AND tier_id = $2",
+		consumerID, tierID,
+	)
+	return tag.RowsAffected() > 0, err
+}
+
 func (a *PostgresAdapter) GetConsumerScopes(ctx context.Context, consumerID string) ([]string, error) {
 	rows, err := a.pool.Query(ctx, "SELECT tier_id FROM consumer_scopes WHERE consumer_id = $1", consumerID)
 	if err != nil {

@@ -152,6 +152,28 @@ func TestKeysKeepNullableFieldsMetadataAndCounters(t *testing.T) {
 	}
 }
 
+func TestAScopeIsRemovedOnceAndRemovingItAgainChangesNothing(t *testing.T) {
+	a, ctx := freshDB(t), context.Background()
+	seedTier(t, a, "kept")
+	seedTier(t, a, "taken")
+	if err := a.CreateConsumer(ctx, &Consumer{ID: "c1", Name: "research", TokenHash: "h1", IsActive: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tier := range []string{"kept", "taken"} {
+		if err := a.AddConsumerScope(ctx, "c1", tier); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, want := range []bool{true, false} {
+		if removed, err := a.RemoveConsumerScope(ctx, "c1", "taken"); err != nil || removed != want {
+			t.Fatalf("removal %d: removed %v err %v", i, removed, err)
+		}
+	}
+	if scopes, err := a.GetConsumerScopes(ctx, "c1"); err != nil || len(scopes) != 1 || scopes[0] != "kept" {
+		t.Fatalf("scopes %v err %v", scopes, err)
+	}
+}
+
 func TestConsumersScopesAreIdempotentAndInactiveNeverAuthenticates(t *testing.T) {
 	a, ctx := freshDB(t), context.Background()
 	seedTier(t, a, "t")

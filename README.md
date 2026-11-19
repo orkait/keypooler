@@ -169,6 +169,7 @@ curl localhost:8080/key?feature=firecrawl_scrape -H "Authorization: Bearer <cons
 | `GET` `POST` | `/admin/consumers` | admin | list / create consumers |
 | `DELETE` | `/admin/consumers/{id}` | admin | remove a consumer (+ its scopes) |
 | `POST` | `/admin/consumers/{id}/scopes` | admin | grant a tier scope |
+| `DELETE` | `/admin/consumers/{id}/scopes/{tier}` | admin | take a tier scope back; `404` when the consumer had none |
 | `GET` | `/admin/usage?limit=N` | admin | audit log |
 | `GET` | `/admin/health` | admin | pool size |
 </details>
