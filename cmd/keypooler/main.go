@@ -59,6 +59,7 @@ func main() {
 	}
 	logger.Info().Int("pool_size", pool.PoolSize()).Bool("encryption", sealer.Enabled()).Msg("key pool initialized")
 	stopBalances := startBalances(pool, logger)
+	stopRetention := startRetention(store, logger)
 
 	handler := api.NewRouter(&api.Server{
 		DB:         store,
@@ -70,6 +71,7 @@ func main() {
 		Logger:     logger,
 	})
 	serveUntilSignalled(handler, logger)
+	stopRetention()
 	stopBalances()
 	stopWriteback()
 	logger.Info().Msg("keypooler stopped")
@@ -110,6 +112,33 @@ func startBalances(pool *keypool.Manager, logger zerolog.Logger) func() {
 	go func() {
 		syncer.Run(ctx)
 		close(done)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func startRetention(store *db.PostgresAdapter, logger zerolog.Logger) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(config.PrunePeriod)
+		defer ticker.Stop()
+		for {
+			removed, err := store.PruneEvents(ctx, time.Now().Add(-config.EventRetention))
+			if err != nil {
+				logger.Error().Err(err).Msg("events past retention not pruned")
+			} else {
+				logger.Info().Int64("removed", removed).Msg("events past retention pruned")
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
 	}()
 	return func() {
 		cancel()

@@ -162,6 +162,26 @@ func (a *PostgresAdapter) ListUsageEvents(ctx context.Context, limit int) ([]*Us
 	return events, rows.Err()
 }
 
+func (a *PostgresAdapter) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	var removed int64
+	for _, query := range []string{
+		"DELETE FROM usage_events WHERE created_at < $1",
+		"DELETE FROM spend_events WHERE created_at < $1",
+	} {
+		tag, err := tx.Exec(ctx, query, before)
+		if err != nil {
+			return 0, err
+		}
+		removed += tag.RowsAffected()
+	}
+	return removed, tx.Commit(ctx)
+}
+
 func NewUsageEvent(keyID, consumerID, feature string) *UsageEvent {
 	return &UsageEvent{ID: uuid.New().String(), KeyID: keyID, ConsumerID: consumerID, Feature: feature, CreatedAt: time.Now().UTC()}
 }
