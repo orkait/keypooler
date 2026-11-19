@@ -23,6 +23,45 @@ func (f failingCreates) CreateTier(context.Context, *db.Tier, []*db.TierFeature)
 }
 func (f failingCreates) CreateConsumer(context.Context, *db.Consumer) error { return f.err }
 
+type scopedConsumers struct {
+	db.DBAdapter
+	granted map[string]bool
+}
+
+func (s *scopedConsumers) GetTierByName(_ context.Context, name string) (*db.Tier, error) {
+	if name == "missing" {
+		return nil, nil
+	}
+	return &db.Tier{ID: "id-" + name, Name: name}, nil
+}
+
+func (s *scopedConsumers) RemoveConsumerScope(_ context.Context, consumerID, tierID string) (bool, error) {
+	removed := s.granted[consumerID+"/"+tierID]
+	delete(s.granted, consumerID+"/"+tierID)
+	return removed, nil
+}
+
+func TestAScopeIsTakenBackOnceThenTheConsumerHasNothingLeftToLose(t *testing.T) {
+	store := &scopedConsumers{granted: map[string]bool{"c1/id-groq": true}}
+	h := NewRouter(&Server{DB: store, AdminToken: adminToken, Auth: NewAuthCache(time.Minute), Logger: zerolog.Nop()})
+	for _, step := range []struct {
+		path string
+		want int
+	}{
+		{"/admin/consumers/c1/scopes/groq", http.StatusOK},
+		{"/admin/consumers/c1/scopes/groq", http.StatusNotFound},
+		{"/admin/consumers/c1/scopes/missing", http.StatusNotFound},
+	} {
+		r := httptest.NewRequest(http.MethodDelete, step.path, nil)
+		r.Header.Set(headerAuthorization, bearer(adminToken))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != step.want {
+			t.Fatalf("%s answered %d, want %d: %s", step.path, w.Code, step.want, w.Body)
+		}
+	}
+}
+
 func TestACreateIsAConflictOnlyWhenTheNameIsTaken(t *testing.T) {
 	routes := map[string]string{
 		"/admin/tiers":     `{"name":"t","features":{"chat":{"rate_limit":1}}}`,

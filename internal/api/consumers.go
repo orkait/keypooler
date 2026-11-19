@@ -112,6 +112,25 @@ func (s *Server) AddConsumerScope(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, grantedScope{ConsumerID: id, Tier: tier.Name})
 }
 
+func (s *Server) RemoveConsumerScope(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue(pathID)
+	ctx := r.Context()
+	tier, ok := s.tierNamed(ctx, w, r.PathValue(pathName))
+	if !ok {
+		return
+	}
+	removed, err := s.DB.RemoveConsumerScope(ctx, id, tier.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove scope")
+		return
+	}
+	if !removed {
+		writeError(w, http.StatusNotFound, "consumer has no scope on tier "+tier.Name)
+		return
+	}
+	writeJSON(w, http.StatusOK, grantedScope{ConsumerID: id, Tier: tier.Name})
+}
+
 func (s *Server) ListUsageEvents(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get(limitParam), defaultUsageListLimit, maxUsageListLimit)
 	events, err := s.DB.ListUsageEvents(r.Context(), limit)

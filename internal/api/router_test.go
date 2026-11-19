@@ -22,7 +22,7 @@ func TestEveryAdminRouteWantsTheAdminToken(t *testing.T) {
 		"GET /admin/tiers", "POST /admin/tiers", "PATCH /admin/tiers",
 		"GET /admin/keys", "POST /admin/keys", "DELETE /admin/keys/k1", "GET /admin/health",
 		"GET /admin/consumers", "POST /admin/consumers", "DELETE /admin/consumers/c1",
-		"POST /admin/consumers/c1/scopes", "GET /admin/usage",
+		"POST /admin/consumers/c1/scopes", "DELETE /admin/consumers/c1/scopes/t", "GET /admin/usage",
 	}
 	for _, route := range routes {
 		method, path, _ := strings.Cut(route, " ")

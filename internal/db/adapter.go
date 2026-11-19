@@ -31,6 +31,7 @@ type DBAdapter interface {
 	GetAllConsumers(ctx context.Context) ([]*Consumer, error)
 	DeleteConsumer(ctx context.Context, id string) error
 	AddConsumerScope(ctx context.Context, consumerID, tierID string) error
+	RemoveConsumerScope(ctx context.Context, consumerID, tierID string) (bool, error)
 	GetConsumerScopes(ctx context.Context, consumerID string) ([]string, error)
 	ConsumerScopesByConsumer(ctx context.Context) (map[string][]string, error)
 
